@@ -94,7 +94,33 @@ def load_config(config_path='config/config.ini'):
              return None # Or raise an error? For now return None
 
         logger.info(f"Configuration loaded successfully from: {config_path}")
-        # Basic validation (example: check essential keys)
+
+        # --- Apply Environment Variable Overrides ---
+        logger.info("Checking for environment variable overrides...")
+        overrides_applied = 0
+        for section, keys in DEFAULT_CONFIG.items():
+            for key in keys:
+                # Construct environment variable name (e.g., TELEGRAM_API_ID, MT5_ACCOUNT)
+                env_var_name = f"{section.upper()}_{key.upper()}"
+                env_value = os.environ.get(env_var_name)
+                if env_value is not None:
+                    try:
+                        # Ensure section exists before setting (should always exist due to defaults)
+                        if not config.has_section(section):
+                            config.add_section(section)
+                        config.set(section, key, env_value)
+                        logger.info(f"Overrode config '[{section}] {key}' with environment variable '{env_var_name}'.")
+                        overrides_applied += 1
+                    except Exception as e:
+                         # Log error but continue trying other variables
+                         logger.error(f"Error applying override from env var '{env_var_name}' for '[{section}] {key}': {e}")
+        if overrides_applied > 0:
+             logger.info(f"Applied {overrides_applied} configuration overrides from environment variables.")
+        else:
+             logger.info("No environment variable overrides found.")
+        # --- End Environment Variable Overrides ---
+
+        # Validate the final configuration (including overrides)
         validate_config(config)
         return config
 

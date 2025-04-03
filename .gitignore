@@ -1,0 +1,29 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables
+.env
+*.env
+
+# Configuration files (containing secrets)
+config/config.ini
+
+# Log files
+logs/*.log
+*.log
+
+# IDE specific files
+.vscode/
+.idea/
+
+# Dependency directories
+venv/
+.venv/
+env/
+.env/
+
+# Telegram session files
+*.session
+*.session-journal

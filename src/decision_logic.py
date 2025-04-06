@@ -20,37 +20,9 @@ class DecisionLogic:
         """
         self.config = config
         self.fetcher = data_fetcher
-        try:
-            # Manually strip comments before converting float values
-            sentiment_weight_str = config.get('DecisionLogic', 'sentiment_weight', fallback='0.5').split('#')[0].strip()
-            price_action_weight_str = config.get('DecisionLogic', 'price_action_weight', fallback='0.5').split('#')[0].strip()
-            approval_threshold_str = config.get('DecisionLogic', 'approval_threshold', fallback='0.6').split('#')[0].strip()
-
-            self.sentiment_weight = float(sentiment_weight_str)
-            self.price_action_weight = float(price_action_weight_str)
-            self.approval_threshold = float(approval_threshold_str)
-            self.use_sentiment = config.getboolean('DecisionLogic', 'use_sentiment_analysis', fallback=True) # Read boolean
-            self.mt5_symbol = config.get('MT5', 'symbol')
-
-            # Validate weights sum approximately to 1.0
-            # Adjust weights if sentiment is disabled
-            if not self.use_sentiment:
-                 logger.info("Sentiment analysis is disabled in config. Price action weight will be 1.0.")
-                 self.price_action_weight = 1.0
-                 self.sentiment_weight = 0.0 # Set sentiment weight to 0
-            elif not (0.99 < (self.sentiment_weight + self.price_action_weight) < 1.01):
-                 logger.warning(f"DecisionLogic weights do not sum to 1.0 (Sentiment={self.sentiment_weight}, PriceAction={self.price_action_weight}). Using as configured.")
-                 # Optionally raise error or normalize weights here if sentiment is enabled
-
-        except (ValueError, configparser.NoSectionError, configparser.NoOptionError) as e:
-            logger.error(f"Failed to load DecisionLogic configuration: {e}. Using defaults.")
-            self.sentiment_weight = 0.5
-            self.price_action_weight = 0.5
-            self.approval_threshold = 0.6
-            self.use_sentiment = True # Default fallback if config fails
-            self.mt5_symbol = 'XAUUSD' # Fallback symbol
-
-        logger.info(f"DecisionLogic initialized: UseSentiment={self.use_sentiment}, SentimentWeight={self.sentiment_weight}, PriceActionWeight={self.price_action_weight}, Threshold={self.approval_threshold}")
+        # Store config reference for dynamic access
+        logger.info("DecisionLogic initialized.")
+        # Configuration values will be read dynamically in the 'decide' method
 
 
     def decide(self, signal_data: dict):
@@ -105,9 +77,22 @@ class DecisionLogic:
                 return False, f"Price action check failed: {reason}", None
 
             # B. LLM Sentiment Score (Conditional)
+            # --- Read config values dynamically ---
+            use_sentiment = self.config.getboolean('DecisionLogic', 'use_sentiment_analysis', fallback=True)
+            sentiment_weight = self.config.getfloat('DecisionLogic', 'sentiment_weight', fallback=0.5)
+            price_action_weight = self.config.getfloat('DecisionLogic', 'price_action_weight', fallback=0.5)
+            approval_threshold = self.config.getfloat('DecisionLogic', 'approval_threshold', fallback=0.6)
+
+            # Adjust weights if sentiment is disabled
+            if not use_sentiment:
+                 price_action_weight = 1.0
+                 sentiment_weight = 0.0 # Ensure sentiment term becomes zero
+
+            # --- End Read config values ---
+
             normalized_sentiment_score = 0.0 # Default if sentiment is disabled
             sentiment_log_str = "Disabled"
-            if self.use_sentiment:
+            if use_sentiment:
                 # Clamp sentiment score to [-1.0, 1.0] before normalizing
                 clamped_sentiment_score = max(-1.0, min(1.0, sentiment_score))
                 # Normalize clamped score to [0.0, 1.0] for weighting
@@ -120,15 +105,17 @@ class DecisionLogic:
 
             # C. Combined Decision
             # Note: If sentiment is disabled, self.sentiment_weight is 0, so the term becomes zero.
-            total_score = (price_action_score * self.price_action_weight) + \
-                          (normalized_sentiment_score * self.sentiment_weight)
-            logger.info(f"Decision Score: PriceAction({price_action_score:.2f} * {self.price_action_weight}) + Sentiment({sentiment_log_str} * {self.sentiment_weight}) = {total_score:.2f}")
+            # Use dynamically read weights
+            total_score = (price_action_score * price_action_weight) + \
+                          (normalized_sentiment_score * sentiment_weight)
+            logger.info(f"Decision Score: PriceAction({price_action_score:.2f} * {price_action_weight}) + Sentiment({sentiment_log_str} * {sentiment_weight}) = {total_score:.2f}")
 
-            if total_score >= self.approval_threshold:
-                logger.info(f"Decision Approved: Score {total_score:.2f} >= Threshold {self.approval_threshold}. Order Type: {determined_order_type}")
+            # Use dynamically read threshold
+            if total_score >= approval_threshold:
+                logger.info(f"Decision Approved: Score {total_score:.2f} >= Threshold {approval_threshold}. Order Type: {determined_order_type}")
                 return True, f"Approved (Score: {total_score:.2f})", determined_order_type
             else:
-                logger.info(f"Decision Rejected: Score {total_score:.2f} < Threshold {self.approval_threshold}")
+                logger.info(f"Decision Rejected: Score {total_score:.2f} < Threshold {approval_threshold}")
                 return False, f"Rejected (Score: {total_score:.2f})", None
 
         else:
@@ -151,8 +138,10 @@ class DecisionLogic:
                    - str: Reason for the score (e.g., "Determined BUY_LIMIT", "Failed to get market price").
                    - int or None: The determined MT5 order type constant, or None.
         """
-        logger.debug(f"Performing price action check for {action} @ {signal_price}")
-        tick = self.fetcher.get_symbol_tick(self.mt5_symbol)
+        # Read symbol dynamically
+        mt5_symbol = self.config.get('MT5', 'symbol', fallback='XAUUSD')
+        logger.debug(f"Performing price action check for {action} @ {signal_price} on symbol {mt5_symbol}")
+        tick = self.fetcher.get_symbol_tick(mt5_symbol)
         if not tick:
             return 0.0, "Failed to get current market price", None
 

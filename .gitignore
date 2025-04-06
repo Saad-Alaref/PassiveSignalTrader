@@ -7,8 +7,7 @@ __pycache__/
 .env
 *.env
 
-# Configuration files (containing secrets)
-config/config.ini
+config/*
 
 # Log files
 logs/*.log
@@ -27,3 +26,5 @@ env/
 # Telegram session files
 *.session
 *.session-journal
+
+telegram_reader*

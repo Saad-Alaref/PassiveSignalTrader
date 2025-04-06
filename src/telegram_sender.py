@@ -1,9 +1,11 @@
 import logging
 import asyncio
 from telethon import TelegramClient
-from telethon.errors import FloodWaitError, UserDeactivatedBanError, AuthKeyError # Removed RpcError
+from telethon.errors import FloodWaitError, UserDeactivatedBanError, AuthKeyError
+from telethon.tl.custom import Button
 import configparser
 import sys
+import uuid # To generate unique IDs for confirmations
 
 logger = logging.getLogger('TradeBot')
 
@@ -227,3 +229,70 @@ class TelegramSender:
             except Exception as fallback_e:
                  logger.error(f"Failed to send plain text fallback message: {fallback_e}", exc_info=True)
                  return False # Both formatted and plain text failed
+
+    async def send_confirmation_message(self, confirmation_id: str, trade_details: dict, message_text: str, target_chat_id=None):
+        """
+        Sends a message with Yes/No inline buttons for trade confirmation.
+
+        Args:
+            confirmation_id (str): A unique identifier for this confirmation request.
+            trade_details (dict): Dictionary containing details about the trade (e.g., symbol, action, volume). Used for logging/context.
+            message_text (str): The main text of the message asking for confirmation.
+            target_chat_id (int, optional): Specific chat ID to send to. Defaults to the main configured channel.
+
+        Returns:
+            telethon.tl.custom.message.Message or None: The sent message object if successful, otherwise None.
+        """
+        if not self.client or not self.client.is_connected():
+            logger.error("Cannot send confirmation message, Telegram Sender client not connected.")
+            return None
+
+        actual_target_id = target_chat_id if target_chat_id is not None else self.target_channel_id
+
+        if not actual_target_id:
+            log_target_desc = "debug" if target_chat_id is not None else "main"
+            logger.error(f"Cannot send confirmation message, target {log_target_desc} channel ID not resolved or provided.")
+            return None
+
+        # Define the inline buttons
+        buttons = [
+            [ # First row
+                Button.inline("✅ Yes", data=f"confirm_yes_{confirmation_id}"),
+                Button.inline("❌ No", data=f"confirm_no_{confirmation_id}")
+            ]
+            # Can add more rows if needed
+        ]
+
+        try:
+            log_target_desc = f"channel {actual_target_id}" if actual_target_id == self.target_channel_id else f"debug channel {actual_target_id}"
+            logger.info(f"Sender sending confirmation message (ID: {confirmation_id}) to {log_target_desc}: {message_text[:100]}...")
+            logger.debug(f"Trade details for confirmation {confirmation_id}: {trade_details}")
+
+            sent_message = await self.client.send_message(
+                actual_target_id,
+                message_text,
+                buttons=buttons,
+                parse_mode='html' # Or None if you don't need formatting
+            )
+            logger.info(f"Confirmation message (ID: {confirmation_id}) sent successfully to {log_target_desc}. Message ID: {sent_message.id}")
+            return sent_message
+        except FloodWaitError as fwe:
+            logger.error(f"Flood wait error when sending confirmation message (ID: {confirmation_id}): waiting {fwe.seconds} seconds.")
+            print(f"Telegram flood wait on send confirmation: {fwe.seconds}s", file=sys.stderr)
+            return None
+        except Exception as e:
+            logger.error(f"Sender failed to send confirmation message (ID: {confirmation_id}) to channel {actual_target_id}: {e}", exc_info=True)
+            # Optionally try plain text fallback
+            try:
+                logger.warning(f"Attempting to send confirmation message (ID: {confirmation_id}) as plain text due to error.")
+                sent_message = await self.client.send_message(
+                    actual_target_id,
+                    message_text,
+                    buttons=buttons,
+                    parse_mode=None
+                )
+                logger.info(f"Plain text confirmation message (ID: {confirmation_id}) sent successfully. Message ID: {sent_message.id}")
+                return sent_message
+            except Exception as fallback_e:
+                logger.error(f"Failed to send plain text fallback confirmation message (ID: {confirmation_id}): {fallback_e}", exc_info=True)
+                return None

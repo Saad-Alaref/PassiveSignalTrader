@@ -23,12 +23,9 @@ class MT5Executor:
         # Manually strip comments before converting int values
         retry_attempts_str = config.get('Retries', 'requote_retry_attempts', fallback='5').split('#')[0].strip()
         retry_delay_str = config.get('Retries', 'requote_retry_delay_seconds', fallback='4').split('#')[0].strip()
-        slippage_str = config.get('Trading', 'max_slippage', fallback='10').split('#')[0].strip()
-
         self.requote_retries = int(retry_attempts_str)
         self.requote_delay = int(retry_delay_str)
-        # Deviation/slippage for market orders (in points)
-        self.deviation = int(slippage_str) # Default 10 points slippage
+        # Slippage/deviation will be read dynamically
 
     def _send_order_with_retry(self, request):
         """
@@ -211,7 +208,9 @@ class MT5Executor:
         if order_type in [mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL]: # Market Order
             request["action"] = mt5.TRADE_ACTION_DEAL
             # Price is ignored by server for market orders
-            request["deviation"] = self.deviation # Slippage for market orders
+            # Read deviation dynamically for market orders
+            deviation = self.config.getint('Trading', 'max_slippage', fallback=10)
+            request["deviation"] = deviation # Slippage for market orders
         elif order_type in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP, mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP]: # Pending Order
             request["action"] = mt5.TRADE_ACTION_PENDING
             if price is None:
@@ -447,7 +446,7 @@ class MT5Executor:
             "volume": close_volume,
             "type": close_order_type,
             "price": mt5.symbol_info_tick(pos.symbol).ask if close_order_type == mt5.ORDER_TYPE_BUY else mt5.symbol_info_tick(pos.symbol).bid, # Current market price for closing
-            "deviation": self.deviation,
+            "deviation": self.config.getint('Trading', 'max_slippage', fallback=10), # Read slippage dynamically
             "magic": pos.magic, # Use the magic number of the original position
             "comment": comment,
             "type_time": mt5.ORDER_TIME_GTC,

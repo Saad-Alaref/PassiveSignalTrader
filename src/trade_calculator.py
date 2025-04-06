@@ -21,23 +21,9 @@ class TradeCalculator:
         """
         self.config = config
         self.fetcher = data_fetcher # Store fetcher for future use
-        self.lot_size_method = config.get('Trading', 'lot_size_method', fallback='fixed').lower()
-        # Manually strip comments before converting float values
-        fixed_lot_size_str = config.get('Trading', 'fixed_lot_size', fallback='0.01').split('#')[0].strip()
-        default_lot_size_str = config.get('Trading', 'default_lot_size', fallback='0.01').split('#')[0].strip()
-
-        self.fixed_lot_size = float(fixed_lot_size_str)
-        self.default_lot_size = float(default_lot_size_str)
-
-        logger.info(f"TradeCalculator initialized. Method='{self.lot_size_method}', FixedSize={self.fixed_lot_size}, DefaultSize={self.default_lot_size}")
-
-        # Validate fixed lot size is positive
-        if self.fixed_lot_size <= 0:
-            logger.warning(f"Configured fixed_lot_size ({self.fixed_lot_size}) is not positive. Using default_lot_size ({self.default_lot_size}) as fallback for fixed method.")
-            self.fixed_lot_size = self.default_lot_size
-        if self.default_lot_size <= 0:
-             logger.error("Default lot size is not positive. Setting to 0.01 as emergency fallback.")
-             self.default_lot_size = 0.01 # Emergency fallback
+        # Store config reference for dynamic access
+        logger.info("TradeCalculator initialized.")
+        # Lot size parameters will be read dynamically in calculate_lot_size
 
 
     def calculate_lot_size(self, signal_data: dict):
@@ -51,27 +37,45 @@ class TradeCalculator:
         Returns:
             float: The calculated lot size, or the default lot size if calculation fails.
         """
-        logger.debug(f"Calculating lot size using method: {self.lot_size_method}")
-        calculated_lot = self.default_lot_size # Start with default as fallback
+        # --- Read config values dynamically ---
+        lot_size_method = self.config.get('Trading', 'lot_size_method', fallback='fixed').lower()
+        fixed_lot_size = self.config.getfloat('Trading', 'fixed_lot_size', fallback=0.01)
+        default_lot_size = self.config.getfloat('Trading', 'default_lot_size', fallback=0.01)
+
+        # Validate default lot size (emergency fallback)
+        if default_lot_size <= 0:
+             logger.error("Default lot size is not positive. Using 0.01 as emergency fallback.")
+             default_lot_size = 0.01
+
+        # Validate fixed lot size (use default if invalid)
+        if fixed_lot_size <= 0:
+            logger.warning(f"Configured fixed_lot_size ({fixed_lot_size}) is not positive. Using default_lot_size ({default_lot_size}) as fallback for fixed method.")
+            fixed_lot_size = default_lot_size
+        # --- End Read config values ---
+
+        logger.debug(f"Calculating lot size using method: {lot_size_method}")
+        calculated_lot = default_lot_size # Start with default as fallback
 
         # --- Determine Base Lot Size ---
-        if self.lot_size_method == 'fixed':
-            calculated_lot = self.fixed_lot_size
+        if lot_size_method == 'fixed':
+            calculated_lot = fixed_lot_size
             logger.info(f"Base lot size (fixed): {calculated_lot}")
 
         # --- Future Implementation Examples ---
-        # elif self.lot_size_method == 'risk_percent_equity':
+        # elif lot_size_method == 'risk_percent_equity':
         #     # ... (calculation logic) ...
         #     calculated_lot = ...
         #     logger.info(f"Base lot size (risk %): {calculated_lot}")
 
         else:
-            logger.warning(f"Unsupported lot_size_method '{self.lot_size_method}'. Using default: {self.default_lot_size}")
-            calculated_lot = self.default_lot_size
+            logger.warning(f"Unsupported lot_size_method '{lot_size_method}'. Using default: {default_lot_size}")
+            calculated_lot = default_lot_size
 
         # --- Adjust Lot Size based on Broker Constraints ---
         try:
-            symbol_info = self.fetcher.get_symbol_info(self.config.get('MT5', 'symbol'))
+            # Read symbol dynamically
+            mt5_symbol = self.config.get('MT5', 'symbol', fallback='XAUUSD')
+            symbol_info = self.fetcher.get_symbol_info(mt5_symbol)
             if symbol_info:
                 volume_min = symbol_info.volume_min
                 volume_max = symbol_info.volume_max
@@ -141,66 +145,34 @@ class TradeCalculator:
     #     return calculated_lot
 
 
-    def calculate_auto_sl_price(self, symbol: str, order_type: int, entry_price: float, volume: float, risk_usd: float):
+    def calculate_sl_from_distance(self, symbol: str, order_type: int, entry_price: float, sl_price_distance: float):
         """
-        Calculates the Stop Loss price based on a fixed USD risk amount.
+        Calculates the Stop Loss price based on a fixed price distance from entry.
 
         Args:
             symbol (str): The trading symbol.
             order_type (int): mt5.ORDER_TYPE_BUY or mt5.ORDER_TYPE_SELL.
             entry_price (float): The entry price of the trade.
-            volume (float): The volume (lot size) of the trade.
-            risk_usd (float): The maximum desired risk in account currency (USD).
+            sl_price_distance (float): The desired SL distance in price units (e.g., 5.0 for $5 price move).
 
         Returns:
             float or None: The calculated SL price, or None if calculation fails.
         """
-        if not symbol or not entry_price or not volume or volume <= 0 or not risk_usd or risk_usd <= 0:
-            logger.error("Invalid parameters for calculate_auto_sl_price.")
+        log_prefix = f"[CalcSLFromDist][{symbol}]" # Add log prefix
+        logger.debug(f"{log_prefix} Inputs: entry={entry_price}, distance={sl_price_distance}, order_type={order_type}")
+        if not symbol or not entry_price or sl_price_distance <= 0:
+            logger.error("Invalid parameters for calculate_sl_from_distance.")
             return None
 
         symbol_info = self.fetcher.get_symbol_info(symbol)
         if not symbol_info:
-            logger.error(f"Cannot calculate Auto SL: Failed to get symbol info for {symbol}.")
+            logger.error(f"{log_prefix} Cannot calculate SL: Failed to get symbol info for {symbol}.")
             return None
 
-        # --- Calculate Tick Value ---
-        tick = self.fetcher.get_symbol_tick(symbol)
-        if not tick:
-            logger.error(f"Cannot calculate Auto SL: Failed to get current tick for {symbol}.")
-            return None
-
-        # Use order_calc_profit to find the value of one tick move for 1 lot
-        tick_value_per_lot = mt5.order_calc_profit(order_type, symbol, 1.0, tick.ask, tick.ask + symbol_info.point)
-        if order_type == mt5.ORDER_TYPE_SELL: # For sell, calculate profit of price going down one tick
-             tick_value_per_lot = mt5.order_calc_profit(order_type, symbol, 1.0, tick.bid, tick.bid - symbol_info.point)
-
-        # order_calc_profit returns the profit/loss. We need the absolute value representing the tick value.
-        if tick_value_per_lot is None:
-             logger.error(f"Cannot calculate Auto SL: order_calc_profit failed for {symbol}. Error: {mt5.last_error()}")
-             return None
-        tick_value_per_lot = abs(tick_value_per_lot) # Ensure positive value
-
-        if tick_value_per_lot == 0:
-            logger.error(f"Cannot calculate Auto SL: Calculated tick value is zero for {symbol}.")
-            return None
-        # --- End Calculate Tick Value ---
-
-        point = symbol_info.point
         digits = symbol_info.digits
-
-        # Calculate value per point for the specific trade volume
-        value_per_point = tick_value_per_lot * volume
-
-        if value_per_point == 0:
-             logger.error(f"Cannot calculate Auto SL: Value per point is zero for volume {volume}.")
-             return None
-
-        # Calculate required SL distance in points
-        sl_distance_points = abs(risk_usd / value_per_point)
-
-        # Calculate SL distance in price terms
-        sl_distance_price = sl_distance_points * point
+        # The sl_price_distance is already the value we need
+        sl_distance_price = abs(sl_price_distance) # Ensure positive distance
+        logger.debug(f"{log_prefix} Using direct price distance: {sl_distance_price}")
 
         # Determine SL price based on order type
         sl_price = None
@@ -215,7 +187,100 @@ class TradeCalculator:
         # Round the final SL price to the symbol's digits
         sl_price_rounded = round(sl_price, digits)
 
-        logger.info(f"Calculated Auto SL for {symbol} {order_type}: Entry={entry_price}, Risk=${risk_usd}, Volume={volume} -> SL Distance={sl_distance_price:.{digits}f} ({sl_distance_points:.2f} points) -> SL Price={sl_price_rounded}")
+        logger.info(f"{log_prefix} Calculated SL for {symbol} {order_type}: Entry={entry_price}, Distance={sl_distance_price:.{digits}f} -> SL Price={sl_price_rounded}")
+        return sl_price_rounded
+
+    def calculate_tp_from_distance(self, symbol: str, order_type: int, entry_price: float, tp_price_distance: float):
+        """
+        Calculates the Take Profit price based on a fixed price distance from entry.
+
+        Args:
+            symbol (str): The trading symbol.
+            order_type (int): mt5.ORDER_TYPE_BUY or mt5.ORDER_TYPE_SELL.
+            entry_price (float): The entry price of the trade.
+            tp_price_distance (float): The desired TP distance in price units (e.g., 10.0 for $10 price move).
+
+        Returns:
+            float or None: The calculated TP price, or None if calculation fails.
+        """
+        log_prefix = f"[CalcTPFromDist][{symbol}]" # Add log prefix
+        logger.debug(f"{log_prefix} Inputs: entry={entry_price}, distance={tp_price_distance}, order_type={order_type}")
+        if not symbol or not entry_price or tp_price_distance <= 0:
+            logger.error("Invalid parameters for calculate_tp_from_distance.")
+            return None
+
+        symbol_info = self.fetcher.get_symbol_info(symbol)
+        if not symbol_info:
+            logger.error(f"{log_prefix} Cannot calculate TP: Failed to get symbol info for {symbol}.")
+            return None
+
+        digits = symbol_info.digits
+        # The tp_price_distance is already the value we need
+        tp_distance_price = abs(tp_price_distance) # Ensure positive distance
+        logger.debug(f"{log_prefix} Using direct price distance: {tp_distance_price}")
+
+        # Determine TP price based on order type
+        tp_price = None
+        if order_type == mt5.ORDER_TYPE_BUY:
+            tp_price = entry_price + tp_distance_price
+        elif order_type == mt5.ORDER_TYPE_SELL:
+            tp_price = entry_price - tp_distance_price
+        else:
+            logger.error(f"Cannot calculate Auto TP: Invalid order type {order_type}.")
+            return None
+
+        # Round the final TP price to the symbol's digits
+        tp_price_rounded = round(tp_price, digits)
+
+        logger.info(f"{log_prefix} Calculated TP for {symbol} {order_type}: Entry={entry_price}, Distance={tp_distance_price:.{digits}f} -> TP Price={tp_price_rounded}")
+        return tp_price_rounded
+
+    def calculate_trailing_sl_price(self, symbol: str, order_type: int, current_price: float, trail_distance_price: float):
+        """
+        Calculates the Trailing Stop Loss price based on the current market price
+        and a fixed price distance.
+
+        Args:
+            symbol (str): The trading symbol.
+            order_type (int): mt5.ORDER_TYPE_BUY or mt5.ORDER_TYPE_SELL.
+            current_price (float): The current relevant market price (Bid for BUY, Ask for SELL).
+            trail_distance_price (float): The desired distance behind the current price, in price units.
+
+        Returns:
+            float or None: The calculated Trailing SL price, or None if calculation fails.
+        """
+        log_prefix = f"[CalcTrailSL][{symbol}]" # Add log prefix
+        logger.debug(f"{log_prefix} Inputs: current_price={current_price}, distance={trail_distance_price}, order_type={order_type}")
+        if not symbol or not current_price or trail_distance_price <= 0:
+            logger.error("Invalid parameters for calculate_trailing_sl_price.")
+            return None
+
+        symbol_info = self.fetcher.get_symbol_info(symbol)
+        if not symbol_info:
+            logger.error(f"{log_prefix} Cannot calculate Trailing SL: Failed to get symbol info for {symbol}.")
+            return None
+
+        digits = symbol_info.digits
+        # The trail_distance_price is already the value we need
+        sl_distance_price = abs(trail_distance_price) # Ensure positive distance
+        logger.debug(f"{log_prefix} Using direct price distance: {sl_distance_price}")
+
+        # Determine SL price based on order type and *current* price
+        sl_price = None
+        if order_type == mt5.ORDER_TYPE_BUY:
+            # For a BUY, SL trails below the current BID price
+            sl_price = current_price - sl_distance_price
+        elif order_type == mt5.ORDER_TYPE_SELL:
+            # For a SELL, SL trails above the current ASK price
+            sl_price = current_price + sl_distance_price
+        else:
+            logger.error(f"Cannot calculate Trailing SL: Invalid order type {order_type}.")
+            return None
+
+        # Round the final SL price to the symbol's digits
+        sl_price_rounded = round(sl_price, digits)
+
+        logger.info(f"{log_prefix} Calculated Trailing SL for {symbol} {order_type}: CurrentPrice={current_price}, Distance={sl_distance_price:.{digits}f} -> SL Price={sl_price_rounded}")
         return sl_price_rounded
 
 

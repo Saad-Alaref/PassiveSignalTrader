@@ -66,6 +66,9 @@ class SignalAnalyzer:
             context=context, # Pass context
             prompt_type="analyze_signal"
         )
+        # --- Log Raw LLM Result ---
+        logger.debug(f"Raw LLM analysis result: {llm_result}")
+        # --------------------------
 
         if not llm_result:
             logger.warning("LLM analysis returned no result.")
@@ -159,6 +162,7 @@ class SignalAnalyzer:
                     high = float(high_str.strip())
                     if low > high: low, high = high, low # Ensure low <= high
 
+                    # Read strategy dynamically
                     entry_range_strategy = self.config.get('Strategy', 'entry_range_strategy', fallback='midpoint').lower()
                     logger.info(f"{log_prefix} Applying entry range strategy '{entry_range_strategy}' to range '{entry_price_raw}'.")
 
@@ -252,6 +256,9 @@ class SignalAnalyzer:
             context=context, # Pass context
             prompt_type="analyze_edit_or_reply"
         )
+        # --- Log Raw LLM Result ---
+        logger.debug(f"Raw LLM update analysis result: {update_result}")
+        # --------------------------
 
         if not update_result:
             logger.warning("LLM update analysis returned no result.")

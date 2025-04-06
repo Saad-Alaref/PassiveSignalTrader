@@ -1,7 +1,7 @@
 import logging
 import MetaTrader5 as mt5
-from collections import deque
-from datetime import datetime, timezone
+from collections import deque, defaultdict # Keep deque, defaultdict might be useful later
+from datetime import datetime, timezone, timedelta # Keep only this one
 from telethon import events
 
 logger = logging.getLogger('TradeBot')
@@ -28,21 +28,40 @@ class StateManager:
         #  'all_tps': [1910.0, 1920.0, "N/A"], # List of TPs from signal
         #  'tp_strategy': 'sequential_partial_close', # Strategy from config
         #  'next_tp_index': 0, # Index of the *next* TP in all_tps to monitor (starts at 0) - Added
-        #  'auto_sl_pending_timestamp': datetime|None
+        #  'auto_sl_pending_timestamp': datetime|None,
+        #  'auto_tp_applied': bool, # Added flag for AutoTP
+        #  'tsl_active': bool # Added flag for Trailing Stop activation
         # }
         self.bot_active_trades = []
-        # Deque for message history
-        history_size = config.getint('LLMContext', 'history_message_count', fallback=5)
-        self.message_history = deque(maxlen=history_size)
-        logger.info(f"StateManager initialized. History size: {history_size}")
+        # Deque for message history - Max size read at init, not easily hot-reloadable
+        self.history_message_count = config.getint('LLMContext', 'history_message_count', fallback=5)
+        self.message_history = deque(maxlen=self.history_message_count)
+        self.last_market_execution_time = None # Timestamp of the last market order execution
+        self.last_market_execution_time = None # Timestamp of the last market order execution
+
+        # --- New: Store pending trade confirmations ---
+        # Structure: { confirmation_id: {'trade_details': {...}, 'timestamp': datetime, 'message_id': int} }
+        self.pending_confirmations = {}
+        # --- End New ---
+
+        logger.info(f"StateManager initialized. History size: {self.history_message_count}")
 
     # --- Active Trade Management ---
 
-    def add_active_trade(self, trade_info):
-        """Adds a new trade to the active trades list."""
+    def add_active_trade(self, trade_info, auto_tp_applied=False):
+        """
+        Adds a new trade to the active trades list.
+
+        Args:
+            trade_info (dict): Dictionary containing trade details.
+            auto_tp_applied (bool): Flag indicating if AutoTP was used for this trade.
+        """
         if not isinstance(trade_info, dict) or 'ticket' not in trade_info:
             logger.error(f"Attempted to add invalid trade_info: {trade_info}")
             return
+        # Add the AutoTP flag to the dictionary before storing
+        trade_info['auto_tp_applied'] = auto_tp_applied
+        trade_info['tsl_active'] = False # Initialize TSL flag
         # Ensure it's not already added
         if not any(t['ticket'] == trade_info['ticket'] for t in self.bot_active_trades):
             self.bot_active_trades.append(trade_info)
@@ -153,6 +172,66 @@ class StateManager:
         """Returns the message history as a list."""
         return list(self.message_history)
 
+    # --- New: Pending Confirmation Management ---
+
+    def add_pending_confirmation(self, confirmation_id: str, trade_details: dict, message_id: int, timestamp: datetime):
+        """
+        Stores details of a trade awaiting user confirmation via Telegram buttons.
+
+        Args:
+            confirmation_id (str): The unique ID for this confirmation request.
+            trade_details (dict): The dictionary containing all necessary parameters for mt5_executor.execute_trade.
+            message_id (int): The ID of the Telegram message sent with the confirmation buttons.
+            timestamp (datetime): The time when the confirmation request was initiated.
+        """
+        if confirmation_id in self.pending_confirmations:
+            logger.warning(f"Attempted to add duplicate pending confirmation ID: {confirmation_id}")
+            # Overwrite maybe? Or ignore? Let's overwrite for now, assuming a retry might occur.
+        self.pending_confirmations[confirmation_id] = {
+            'trade_details': trade_details,
+            'timestamp': timestamp,
+            'message_id': message_id
+        }
+        logger.info(f"Added pending confirmation: ID={confirmation_id}, MsgID={message_id}")
+        logger.debug(f"Pending confirmation details for {confirmation_id}: {trade_details}")
+
+    def get_pending_confirmation(self, confirmation_id: str) -> dict | None:
+        """
+        Retrieves the details of a pending confirmation by its ID.
+
+        Args:
+            confirmation_id (str): The unique ID of the confirmation request.
+
+        Returns:
+            dict | None: The dictionary containing confirmation details, or None if not found.
+        """
+        confirmation_data = self.pending_confirmations.get(confirmation_id)
+        if confirmation_data:
+            logger.debug(f"Retrieved pending confirmation data for ID: {confirmation_id}")
+        else:
+            logger.warning(f"Pending confirmation ID not found: {confirmation_id}")
+        return confirmation_data
+
+    def remove_pending_confirmation(self, confirmation_id: str) -> bool:
+        """
+        Removes a pending confirmation from the store after it's handled (confirmed, rejected, or expired).
+
+        Args:
+            confirmation_id (str): The unique ID of the confirmation request to remove.
+
+        Returns:
+            bool: True if the confirmation was found and removed, False otherwise.
+        """
+        if confirmation_id in self.pending_confirmations:
+            del self.pending_confirmations[confirmation_id]
+            logger.info(f"Removed pending confirmation: ID={confirmation_id}")
+            return True
+        else:
+            logger.warning(f"Attempted to remove non-existent pending confirmation ID: {confirmation_id}")
+            return False
+
+    # --- End New ---
+
     # --- LLM Context Generation ---
 
     def get_llm_context(self, mt5_fetcher):
@@ -167,6 +246,7 @@ class StateManager:
         """
         llm_context = {}
         # Get config settings for context
+        # Read context flags dynamically
         enable_price = self.config.getboolean('LLMContext', 'enable_price_context', fallback=True)
         enable_trades = self.config.getboolean('LLMContext', 'enable_trade_context', fallback=True)
         enable_history = self.config.getboolean('LLMContext', 'enable_history_context', fallback=True)
@@ -211,7 +291,44 @@ class StateManager:
 
         return llm_context
 
+    # --- Market Order Cooldown Management ---
+
+    def record_market_execution(self):
+        """Records the timestamp of the current time as the last market execution."""
+        self.last_market_execution_time = datetime.now(timezone.utc)
+        logger.info(f"Recorded market execution time: {self.last_market_execution_time}")
+
+    def is_market_cooldown_active(self, cooldown_seconds: int) -> bool:
+        """
+        Checks if the market order cooldown period is currently active.
+
+        Args:
+            cooldown_seconds (int): The duration of the cooldown in seconds.
+
+        Returns:
+            bool: True if cooldown is active, False otherwise.
+        """
+        if cooldown_seconds <= 0:
+            return False # Cooldown disabled if duration is zero or negative
+
+        if self.last_market_execution_time is None:
+            return False # No previous market execution recorded
+
+        now = datetime.now(timezone.utc)
+        time_since_last = now - self.last_market_execution_time
+        is_active = time_since_last < timedelta(seconds=cooldown_seconds)
+
+        if is_active:
+            remaining = timedelta(seconds=cooldown_seconds) - time_since_last
+            # Use seconds for logging remaining time for clarity
+            logger.info(f"Market order cooldown is ACTIVE. Time remaining: {remaining.total_seconds():.1f} seconds.")
+        else:
+            logger.debug(f"Market order cooldown is INACTIVE. Time since last: {time_since_last}")
+
+        return is_active
+
 # Example usage (optional, for testing within this file)
+# Add tests for pending confirmations if running standalone
 if __name__ == '__main__':
     import configparser
     from logger_setup import setup_logging
@@ -273,5 +390,33 @@ if __name__ == '__main__':
 
     # Test context generation (requires MT5 connection for full test)
     print("\nLLM Context (No MT5):", state.get_llm_context(fetcher))
+
+    # Test Pending Confirmations
+    print("\n--- Testing Pending Confirmations ---")
+    conf_id_1 = "abc-123"
+    details_1 = {'action': 'BUY', 'symbol': 'TESTUSD', 'volume': 0.01}
+    msg_id_1 = 999
+    ts_1 = datetime.now(timezone.utc)
+
+    state.add_pending_confirmation(conf_id_1, details_1, msg_id_1, ts_1)
+    print("Pending Confirmations after add:", state.pending_confirmations)
+    assert conf_id_1 in state.pending_confirmations
+
+    retrieved_conf = state.get_pending_confirmation(conf_id_1)
+    print("Retrieved Confirmation:", retrieved_conf)
+    assert retrieved_conf is not None
+    assert retrieved_conf['message_id'] == msg_id_1
+    assert retrieved_conf['trade_details']['action'] == 'BUY'
+
+    retrieved_conf_bad = state.get_pending_confirmation("bad-id")
+    assert retrieved_conf_bad is None
+
+    removed = state.remove_pending_confirmation(conf_id_1)
+    assert removed is True
+    print("Pending Confirmations after remove:", state.pending_confirmations)
+    assert conf_id_1 not in state.pending_confirmations
+
+    removed_bad = state.remove_pending_confirmation("bad-id")
+    assert removed_bad is False
 
     print("\nStateManager tests finished.")

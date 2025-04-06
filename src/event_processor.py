@@ -168,7 +168,68 @@ async def process_new_signal(signal_data, message_id, state_manager: StateManage
              logger.info(f"{log_prefix} No valid numeric TPs provided in the signal.")
              exec_tp = None
 
-        # 5. Execute Trade
+        # --- Apply AutoTP if enabled and no TP found ---
+        auto_tp_applied = False
+        logger.debug(f"{log_prefix} Checking AutoTP conditions. Initial exec_tp: {exec_tp}") # Log initial TP state
+        if exec_tp is None: # Only apply if no TP was found from signal
+            enable_auto_tp = config.getboolean('AutoTP', 'enable_auto_tp', fallback=False)
+            logger.debug(f"{log_prefix} AutoTP enabled in config: {enable_auto_tp}") # Log config state
+            if enable_auto_tp:
+                logger.info(f"{log_prefix} No TP found in signal and AutoTP enabled. Attempting to calculate AutoTP...")
+                auto_tp_distance = config.getfloat('AutoTP', 'auto_tp_price_distance', fallback=10.0)
+
+                # Determine entry price for calculation
+                calc_entry_price = None
+                if determined_order_type in [mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL]: # Market Order
+                    # Fetch current price for market order calculation
+                    tick = mt5_fetcher.get_symbol_tick(trade_symbol)
+                    if tick:
+                        calc_entry_price = tick.ask if determined_order_type == mt5.ORDER_TYPE_BUY else tick.bid
+                    else:
+                        logger.error(f"{log_prefix} Cannot calculate AutoTP for market order: Failed to get current tick for {trade_symbol}.")
+                else: # Pending Order
+                    calc_entry_price = exec_price # Use the calculated pending entry price
+
+                if calc_entry_price is not None:
+                    auto_tp_price = trade_calculator.calculate_tp_from_distance(
+                        symbol=trade_symbol,
+                        order_type=determined_order_type,
+                        entry_price=calc_entry_price,
+                        tp_price_distance=auto_tp_distance
+                    )
+                    if auto_tp_price is not None:
+                        exec_tp = auto_tp_price # Use the calculated AutoTP
+                        auto_tp_applied = True
+                        logger.info(f"{log_prefix} Calculated and applied AutoTP: {exec_tp} (Distance: {auto_tp_distance})")
+                        # Update take_profits_list for status message and state storage
+                        take_profits_list = [exec_tp]
+                    else:
+                        logger.error(f"{log_prefix} Failed to calculate AutoTP price. AutoTP will not be applied.") # Log calc failure
+                else:
+                     logger.error(f"{log_prefix} Cannot calculate AutoTP: Could not determine entry price for calculation. AutoTP will not be applied.") # Log entry price failure
+            else:
+                 logger.debug(f"{log_prefix} AutoTP is disabled in config. Skipping.") # Log disabled state
+        else:
+             logger.debug(f"{log_prefix} Signal already has a TP ({exec_tp}). Skipping AutoTP.") # Log existing TP state
+
+        logger.debug(f"{log_prefix} Final exec_tp before sending order: {exec_tp}") # Log final TP value
+        # --- End AutoTP ---
+        # 5. Cooldown Check (Market Orders Only)
+        is_market_order = determined_order_type in [mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL]
+        cooldown_enabled = config.getboolean('Trading', 'enable_market_order_cooldown', fallback=True)
+        cooldown_seconds = config.getint('Trading', 'market_order_cooldown_seconds', fallback=60)
+
+        if is_market_order and cooldown_enabled and state_manager.is_market_cooldown_active(cooldown_seconds):
+            logger.warning(f"{log_prefix} Market order cooldown active. Trade Aborted.")
+            status_message = f"⏳ <b>Trade Aborted</b> <code>[MsgID: {message_id}]</code>\n<b>Reason:</b> Market order cooldown active ({cooldown_seconds}s)."
+            duplicate_checker.add_processed_id(message_id) # Mark aborted as processed
+            await telegram_sender.send_message(status_message, parse_mode='html')
+            if debug_channel_id:
+                debug_msg_cooldown = f"⏳ {log_prefix} Trade Aborted: Market order cooldown active."
+                await telegram_sender.send_message(debug_msg_cooldown, target_chat_id=debug_channel_id)
+            return # Stop processing this signal
+
+        # 6. Execute Trade
         trade_result_tuple = mt5_executor.execute_trade(
             action=action,
             symbol=trade_symbol,
@@ -198,6 +259,7 @@ async def process_new_signal(signal_data, message_id, state_manager: StateManage
             # Display all TPs in status message
             tp_list_str = ', '.join([f"<code>{tp}</code>" if tp != "N/A" else "<i>N/A</i>" for tp in take_profits_list])
             tp_str = f"<code>{exec_tp}</code>" if exec_tp is not None else "<i>None</i>" # Initial TP set on order
+            auto_tp_label = " (Auto)" if auto_tp_applied else ""
             symbol_str = f"<code>{trade_symbol.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')}</code>"
             lot_str = f"<code>{lot_size}</code>"
             ticket_str = f"<code>{ticket}</code>"
@@ -210,14 +272,14 @@ async def process_new_signal(signal_data, message_id, state_manager: StateManage
 <b>Symbol:</b> {symbol_str}
 <b>Volume:</b> {lot_str}
 <b>Entry:</b> {entry_str}
-<b>SL:</b> {sl_str} | <b>TP(s):</b> {tp_list_str} (Initial: {tp_str})"""
+<b>SL:</b> {sl_str} | <b>TP(s):</b> {tp_list_str} (Initial: {tp_str}{auto_tp_label})"""
             logger.info(f"{log_prefix} Trade executed successfully. Ticket: {ticket}")
             await telegram_sender.send_message(status_message, parse_mode='html')
 
             if debug_channel_id:
                 debug_msg_exec_success = f"✅ {log_prefix} Trade Executed Successfully.\n<b>Ticket:</b> <code>{ticket}</code>\n<b>Type:</b> <code>{order_type_str}</code>\n<b>Symbol:</b> <code>{trade_symbol}</code>\n<b>Volume:</b> <code>{lot_size}</code>\n<b>Entry:</b> {entry_str}\n<b>SL:</b> {sl_str}\n<b>TP:</b> {tp_str}"
-                debug_msg_exec_success = f"✅ {log_prefix} Trade Executed Successfully.\n<b>Ticket:</b> <code>{ticket}</code>\n<b>Type:</b> <code>{order_type_str}</code>\n<b>Symbol:</b> <code>{trade_symbol}</code>\n<b>Volume:</b> <code>{lot_size}</code>\n<b>Entry:</b> {entry_str}\n<b>SL:</b> {sl_str}\n<b>TP(s):</b> {tp_list_str} (Initial: {tp_str})"
-                await telegram_sender.send_message(debug_msg_exec_success, target_chat_id=debug_channel_id)
+                debug_msg_exec_success = f"✅ {log_prefix} Trade Executed Successfully.\n<b>Ticket:</b> <code>{ticket}</code>\n<b>Type:</b> <code>{order_type_str}</code>\n<b>Symbol:</b> <code>{trade_symbol}</code>\n<b>Volume:</b> <code>{lot_size}</code>\n<b>Entry:</b> {entry_str}\n<b>SL:</b> {sl_str}\n<b>TP(s):</b> {tp_list_str} (Initial: {tp_str}{auto_tp_label})"
+                await telegram_sender.send_message(debug_msg_exec_success, target_chat_id=debug_channel_id, parse_mode='html') # Ensure parse_mode for debug
 
             # Store trade info and mark for AutoSL if needed
             trade_info = {
@@ -231,13 +293,18 @@ async def process_new_signal(signal_data, message_id, state_manager: StateManage
                 # 'partially_closed': False # Removed, using next_tp_index to track progress
             }
             if state_manager:
-                state_manager.add_active_trade(trade_info)
+                # Pass the auto_tp_applied flag when adding the trade
+                state_manager.add_active_trade(trade_info, auto_tp_applied=auto_tp_applied)
                 if config.getboolean('AutoSL', 'enable_auto_sl', fallback=False) and exec_sl is None:
                     state_manager.mark_trade_for_auto_sl(ticket)
             else:
                 logger.error(f"Cannot store active trade info: StateManager not initialized.")
 
             duplicate_checker.add_processed_id(message_id) # Mark as processed only on success
+
+            # Record market execution time if it was a market order
+            if is_market_order and state_manager:
+                state_manager.record_market_execution()
 
         else: # Execution failed
             error_comment = getattr(trade_result, 'comment', 'Unknown Error') if trade_result else 'None Result (Check Logs)'
@@ -279,6 +346,7 @@ async def process_update(analysis_result, event, state_manager: StateManager,
     reply_to_msg_id = getattr(event, 'reply_to_msg_id', None)
 
     try:
+        logger.debug(f"{log_prefix} Entering process_update. Analysis result type: {analysis_result.get('type') if analysis_result else 'N/A'}, Is Edit: {is_edit}, ReplyTo: {reply_to_msg_id}")
         target_trade_info = None
         is_update_attempt = False
         update_data = None # Holds the dict with update details
@@ -299,9 +367,10 @@ async def process_update(analysis_result, event, state_manager: StateManager,
 
             if relevant_trades:
                 relevant_trades.sort(key=lambda x: x.get('open_time', datetime.min.replace(tzinfo=timezone.utc)), reverse=True) # Handle missing open_time
-                target_trade_info = relevant_trades[0]
-                logger.info(f"{log_prefix} Identified latest trade (Ticket: {target_trade_info.get('ticket')}) as potential target for update.")
+                target_trade_info = relevant_trades[0] # Target is the latest relevant trade
+                logger.info(f"{log_prefix} Identified latest trade (Ticket: {target_trade_info.get('ticket')}, OrigMsgID: {target_trade_info.get('original_msg_id')}) as potential target for 'update' type message.")
                 update_data = analysis_result.get('data') # Use data from initial analysis
+                logger.debug(f"{log_prefix} Using update_data from initial analysis: {update_data}")
             else:
                 logger.info(f"{log_prefix} No active trades found matching criteria for update.")
                 status_message = f"⚠️ <b>Update Ignored</b> <code>[MsgID: {message_id}]</code> - No matching active trade found."
@@ -322,13 +391,15 @@ async def process_update(analysis_result, event, state_manager: StateManager,
             target_trade_info = state_manager.get_trade_by_original_msg_id(original_msg_id) if state_manager else None
 
             if target_trade_info:
-                logger.info(f"{log_prefix} Found tracked trade (Ticket: {target_trade_info.get('ticket')}) linked to original message.")
+                logger.info(f"{log_prefix} Found tracked trade (Ticket: {target_trade_info.get('ticket')}, OrigMsgID: {target_trade_info.get('original_msg_id')}) linked to original message {original_msg_id}.")
                 # Analyze the *edit/reply* text to get update details
-                logger.info(f"{log_prefix} Analyzing edit/reply text for update details...")
+                logger.info(f"{log_prefix} Re-analyzing edit/reply text for update details...")
                 update_analysis_result = signal_analyzer.analyze(message_text, image_data, llm_context) # Re-analyze edit/reply text
+                logger.debug(f"{log_prefix} Re-analysis result for edit/reply: {update_analysis_result}")
 
                 if update_analysis_result and update_analysis_result.get('type') == 'update':
                     update_data = update_analysis_result.get('data')
+                    logger.debug(f"{log_prefix} Using update_data from edit/reply re-analysis: {update_data}")
                     # Allow LLM to override target based on index if provided in update analysis
                     target_index_edit = update_data.get('target_trade_index')
                     if target_index_edit is not None:
@@ -343,19 +414,21 @@ async def process_update(analysis_result, event, state_manager: StateManager,
                          except (ValueError, TypeError):
                               logger.warning(f"{log_prefix} LLM provided non-integer target_trade_index for edit/reply: {target_index_edit}.")
                 else:
-                    logger.warning(f"{log_prefix} Edit/reply text analysis did not yield valid 'update' data. Type: {update_analysis_result.get('type') if update_analysis_result else 'None'}")
+                    logger.warning(f"{log_prefix} Edit/reply text re-analysis did not yield valid 'update' data. Type: {update_analysis_result.get('type') if update_analysis_result else 'None'}")
                     # If analysis fails, update_data remains None, and no action will be taken below.
             else:
                 logger.info(f"{log_prefix} Edit/reply received, but no active trade tracked for original MsgID {original_msg_id}.")
                 # No action needed if no related trade found
 
         # --- Apply the Update if a target and valid update data were found ---
+        logger.debug(f"{log_prefix} Checking if update should be applied: is_update_attempt={is_update_attempt}, target_trade_info_exists={target_trade_info is not None}, update_data_exists={update_data is not None}")
         if is_update_attempt and target_trade_info and update_data:
             ticket_to_update = target_trade_info['ticket']
             update_type = update_data.get('update_type', 'unknown')
             new_sl_val = update_data.get('new_stop_loss', 'N/A')
             # Get list of new TPs for updates
             new_tp_list = update_data.get('new_take_profits', ['N/A'])
+            logger.debug(f"{log_prefix} Preparing to apply update. Ticket: {ticket_to_update}, Update Type: {update_type}, New SL Val: {new_sl_val}, New TP List: {new_tp_list}")
             # TODO: Add handling for close_volume, close_percentage if implementing partial closes
             mod_success = False
             status_message_mod = ""
@@ -380,7 +453,9 @@ async def process_update(analysis_result, event, state_manager: StateManager,
                 else:
                      if new_sl is not None or new_tp is not None:
                          logger.info(f"{log_prefix} Attempting to modify MT5 order/position {ticket_to_update} with new SL={new_sl}, TP={new_tp}")
+                         logger.debug(f"{log_prefix} Calling mt5_executor.modify_trade(ticket={ticket_to_update}, sl={new_sl}, tp={new_tp})")
                          mod_success = mt5_executor.modify_trade(ticket_to_update, sl=new_sl, tp=new_tp)
+                         logger.debug(f"{log_prefix} mt5_executor.modify_trade result: {mod_success}")
                      else:
                          logger.info(f"{log_prefix} No valid new SL or TP found for modify_sltp/move_sl update.")
                          status_message_mod = f"ℹ️ <b>Update Info</b> <code>[MsgID: {message_id}]</code> (Ticket: <code>{ticket_to_update}</code>, Entry: {entry_price_str}). No valid SL/TP values found in message."
@@ -388,17 +463,23 @@ async def process_update(analysis_result, event, state_manager: StateManager,
             elif update_type == "set_be":
                 action_description = "Set SL to Breakeven"
                 logger.info(f"{log_prefix} Attempting to set SL to Breakeven for ticket {ticket_to_update}")
+                logger.debug(f"{log_prefix} Calling mt5_executor.modify_sl_to_breakeven(ticket={ticket_to_update})")
                 mod_success = mt5_executor.modify_sl_to_breakeven(ticket_to_update)
+                logger.debug(f"{log_prefix} mt5_executor.modify_sl_to_breakeven result: {mod_success}")
 
             elif update_type == "close_trade":
                 action_description = "Close Trade"
                 logger.info(f"{log_prefix} Attempting to close trade for ticket {ticket_to_update}")
+                logger.debug(f"{log_prefix} Calling mt5_executor.close_position(ticket={ticket_to_update})")
                 mod_success = mt5_executor.close_position(ticket_to_update) # Close full position
+                logger.debug(f"{log_prefix} mt5_executor.close_position result: {mod_success}")
 
             elif update_type == "cancel_pending":
                 action_description = "Cancel Pending Order"
                 logger.info(f"{log_prefix} Attempting to cancel pending order for ticket {ticket_to_update}")
+                logger.debug(f"{log_prefix} Calling mt5_executor.delete_pending_order(ticket={ticket_to_update})")
                 mod_success = mt5_executor.delete_pending_order(ticket_to_update)
+                logger.debug(f"{log_prefix} mt5_executor.delete_pending_order result: {mod_success}")
 
             # TODO: Add elif for "partial_close" if implemented
 
@@ -437,6 +518,7 @@ async def process_update(analysis_result, event, state_manager: StateManager,
                  duplicate_checker.add_processed_id(message_id)
 
         elif is_update_attempt and not target_trade_info:
+             logger.debug(f"{log_prefix} Update attempt detected but no target trade info found. No action taken.")
              # This case was handled inside the specific update type logic (new message or edit/reply)
              pass # No action needed if no target trade was found
 

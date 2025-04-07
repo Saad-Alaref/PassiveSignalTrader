@@ -1,6 +1,8 @@
 import logging
 from abc import ABC, abstractmethod
 
+from typing import Optional, Type
+
 # Import necessary components
 from .state_manager import StateManager
 from .mt5_executor import MT5Executor
@@ -139,6 +141,6 @@ COMMAND_MAP = {
     "unknown": UnknownUpdateCommand,
 }
 
-def get_command(update_type: str) -> type[UpdateCommand] | None:
+def get_command(update_type: str) -> Optional[Type[UpdateCommand]]:
     """Returns the command class for a given update type string."""
     return COMMAND_MAP.get(update_type, UnknownUpdateCommand) # Default to Unknown

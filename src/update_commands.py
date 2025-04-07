@@ -109,6 +109,8 @@ class CloseTradeCommand(UpdateCommand):
         # close_vol = self.update_data.get('close_volume', 'N/A')
         # close_perc = self.update_data.get('close_percentage', 'N/A')
         # For now, assumes full close
+        success = self.mt5_executor.close_position(ticket=self.ticket_to_update)
+        await self._send_status_message(action_description, success)
         mod_success = self.mt5_executor.close_position(self.ticket_to_update) # Close full position
         await self._send_status_message(action_description, mod_success)
 

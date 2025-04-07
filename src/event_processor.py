@@ -215,6 +215,41 @@ async def process_new_signal(signal_data, message_id, state_manager: StateManage
 
         logger.debug(f"{log_prefix} Final exec_tp before sending order: {exec_tp}") # Log final TP value
         # --- End AutoTP ---
+
+        # --- Adjust Entry Price for Spread on Pending Stop Orders ---
+        if determined_order_type in [mt5.ORDER_TYPE_BUY_STOP, mt5.ORDER_TYPE_SELL_STOP] and exec_price is not None:
+            logger.info(f"{log_prefix} Adjusting entry price for spread on {determined_order_type} order.")
+            tick = mt5_fetcher.get_symbol_tick(trade_symbol)
+            if tick and tick.bid > 0 and tick.ask > 0: # Ensure valid tick data
+                spread = round(tick.ask - tick.bid, 8) # Calculate spread and round
+                symbol_info = mt5_fetcher.get_symbol_info(trade_symbol)
+                point = symbol_info.point if symbol_info else 0.00001 # Default point size
+
+                # Ensure spread is positive and reasonable (e.g., less than 100 pips for safety)
+                if spread < 0:
+                     logger.warning(f"{log_prefix} Negative spread detected ({spread}). Skipping spread adjustment.")
+                # Example safety check: 100 pips (adjust multiplier as needed, e.g., 1000 for 5-digit brokers)
+                elif symbol_info and spread > (100 * (10**symbol_info.digits) * point):
+                     logger.warning(f"{log_prefix} Unusually large spread detected ({spread}). Skipping spread adjustment.")
+                else:
+                    original_price = exec_price
+                    if determined_order_type == mt5.ORDER_TYPE_BUY_STOP:
+                        exec_price += spread
+                        logger.info(f"{log_prefix} Applied spread adjustment for BUY_STOP. Original: {original_price}, Spread: {spread}, New: {exec_price}")
+                    elif determined_order_type == mt5.ORDER_TYPE_SELL_STOP:
+                        exec_price -= spread
+                        logger.info(f"{log_prefix} Applied spread adjustment for SELL_STOP. Original: {original_price}, Spread: {spread}, New: {exec_price}")
+
+                    # Round the adjusted price to the symbol's digits
+                    if symbol_info:
+                        exec_price = round(exec_price, symbol_info.digits)
+                        logger.debug(f"{log_prefix} Rounded adjusted price to {symbol_info.digits} digits: {exec_price}")
+                    else:
+                         logger.warning(f"{log_prefix} Could not get symbol info for rounding adjusted price.")
+
+            else:
+                logger.warning(f"{log_prefix} Could not get valid tick data for {trade_symbol} to adjust entry price for spread. Using original price: {exec_price}")
+        # --- End Spread Adjustment ---
         # 5. Cooldown Check (Market Orders Only)
         is_market_order = determined_order_type in [mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL]
         cooldown_enabled = config.getboolean('Trading', 'enable_market_order_cooldown', fallback=True)
@@ -298,43 +333,310 @@ async def process_new_signal(signal_data, message_id, state_manager: StateManage
             # --- Existing Execution Logic (Moved here) ---
             # 6. Execute Trade (Pending Orders)
             logger.info(f"{log_prefix} Pending order detected. Proceeding with direct execution.")
-        # 6. Execute Trade
-        trade_result_tuple = mt5_executor.execute_trade(
-            action=action,
-            symbol=trade_symbol,
-            order_type=determined_order_type,
-            volume=lot_size,
-            price=exec_price,
-            sl=exec_sl,
-            tp=exec_tp,
-            comment=f"TB SigID {message_id}"
+        # 6. Execute Trade(s)
+        # --- Determine Minimum Lot Size ---
+        symbol_info = mt5_fetcher.get_symbol_info(trade_symbol)
+        min_lot = symbol_info.volume_min if symbol_info else 0.01
+        lot_step = symbol_info.volume_step if symbol_info else 0.01
+        digits = symbol_info.digits if symbol_info else 5 # For rounding prices
+        # Use 0.01 as base split lot, but ensure it's not smaller than the symbol's minimum lot
+        base_split_lot = max(min_lot, 0.01)
+
+        # --- Read Entry Range Strategy ---
+        entry_range_strategy = config.get('Strategy', 'entry_range_strategy', fallback='closest').lower()
+
+        # --- Helper function to parse entry range ---
+        def parse_entry_range(range_str):
+            try:
+                low_str, high_str = range_str.split('-')
+                low = float(low_str)
+                high = float(high_str)
+                if low > high: low, high = high, low # Ensure low <= high
+                return low, high
+            except Exception as e:
+                logger.warning(f"{log_prefix} Failed to parse entry range '{range_str}': {e}")
+                return None, None
+
+        # --- Determine Execution Strategy ---
+        is_entry_range = isinstance(entry_price_raw, str) and '-' in entry_price_raw
+        use_distributed_limits = (
+            tp_strategy == 'sequential_partial_close' and
+            entry_range_strategy == 'distributed' and
+            is_entry_range and
+            lot_size >= base_split_lot * 2 and
+            numeric_tps
         )
-        trade_result, actual_exec_price = trade_result_tuple if trade_result_tuple else (None, None)
+        use_multi_trade_market_stop = (
+            not use_distributed_limits and # Only if not using distributed limits
+            tp_strategy == 'sequential_partial_close' and
+            lot_size >= base_split_lot * 2 and
+            numeric_tps and
+            determined_order_type in [mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL, mt5.ORDER_TYPE_BUY_STOP, mt5.ORDER_TYPE_SELL_STOP] # Market or Stop orders
+        )
 
-        # 6. Handle Execution Result (Moved)
-        if trade_result and trade_result.retcode == mt5.TRADE_RETCODE_DONE:
-            ticket = trade_result.order
-            open_time = datetime.now(timezone.utc)
-            order_type_str_map = {
-                mt5.ORDER_TYPE_BUY: "Market BUY", mt5.ORDER_TYPE_SELL: "Market SELL",
-                mt5.ORDER_TYPE_BUY_LIMIT: "BUY LIMIT", mt5.ORDER_TYPE_SELL_LIMIT: "SELL LIMIT",
-                mt5.ORDER_TYPE_BUY_STOP: "BUY STOP", mt5.ORDER_TYPE_SELL_STOP: "SELL STOP",
-            }
-            order_type_str = order_type_str_map.get(determined_order_type, f"Type {determined_order_type}")
-            final_entry_price = actual_exec_price if actual_exec_price is not None else exec_price
+        # --- Strategy 1: Distributed Pending Limit Orders ---
+        if use_distributed_limits:
+            logger.info(f"{log_prefix} Applying distributed pending limit order strategy.")
+            low_price, high_price = parse_entry_range(entry_price_raw)
 
-            entry_str = f"<code>@{final_entry_price}</code>" if final_entry_price is not None else "<code>Market</code>"
-            sl_str = f"<code>{exec_sl}</code>" if exec_sl is not None else "<i>None</i>"
-            # Display all TPs in status message
-            tp_list_str = ', '.join([f"<code>{tp}</code>" if tp != "N/A" else "<i>N/A</i>" for tp in take_profits_list])
-            tp_str = f"<code>{exec_tp}</code>" if exec_tp is not None else "<i>None</i>" # Initial TP set on order
-            auto_tp_label = " (Auto)" if auto_tp_applied else ""
-            symbol_str = f"<code>{trade_symbol.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')}</code>"
-            lot_str = f"<code>{lot_size}</code>"
-            ticket_str = f"<code>{ticket}</code>"
-            type_str = f"<code>{order_type_str.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')}</code>"
+            if low_price is None or high_price is None:
+                logger.error(f"{log_prefix} Invalid entry range format '{entry_price_raw}'. Aborting distributed strategy.")
+                # Fallback? Or just abort? For now, abort. Consider fallback later.
+                status_message = f"❌ <b>Trade Execution FAILED</b> <code>[MsgID: {message_id}]</code>\n<b>Reason:</b> Invalid entry range format for distributed strategy: '{entry_price_raw}'"
+                await telegram_sender.send_message(status_message, parse_mode='html')
+                duplicate_checker.add_processed_id(message_id)
+                return # Abort this signal processing
 
-            status_message = f"""✅ <b>Trade Executed</b> <code>[MsgID: {message_id}]</code>
+            num_full_trades = int(lot_size // base_split_lot)
+            remainder_lot_raw = lot_size % base_split_lot
+            remainder_lot = round(remainder_lot_raw / lot_step) * lot_step if lot_step > 0 else remainder_lot_raw
+            if remainder_lot < min_lot: remainder_lot = 0.0
+
+            total_trades_to_open = num_full_trades + (1 if remainder_lot > 0 else 0)
+            if total_trades_to_open == 0:
+                 logger.error(f"{log_prefix} Calculated zero trades to open for distributed strategy. Lot Size: {lot_size}, Base Split: {base_split_lot}")
+                 # Abort if somehow calculation leads to zero trades
+                 status_message = f"❌ <b>Trade Execution FAILED</b> <code>[MsgID: {message_id}]</code>\n<b>Reason:</b> Calculated zero trades for distributed strategy."
+                 await telegram_sender.send_message(status_message, parse_mode='html')
+                 duplicate_checker.add_processed_id(message_id)
+                 return
+
+            logger.info(f"{log_prefix} Calculated Trades: {num_full_trades} x {base_split_lot}, Remainder: {remainder_lot}. Total: {total_trades_to_open}. Range: {low_price}-{high_price}")
+
+            # Calculate price step
+            price_step = 0.0
+            if total_trades_to_open > 1:
+                price_step = (high_price - low_price) / (total_trades_to_open - 1)
+
+            executed_tickets_info = []
+            failed_trades = 0
+            successful_trades = 0
+            last_error = ""
+            limit_order_type = mt5.ORDER_TYPE_BUY_LIMIT if action == "BUY" else mt5.ORDER_TYPE_SELL_LIMIT
+
+            # --- Place Pending Limit Orders ---
+            for i in range(total_trades_to_open):
+                current_vol = base_split_lot if i < num_full_trades else remainder_lot
+                # Calculate entry price for this order
+                current_entry_price = low_price + i * price_step
+                current_entry_price = round(current_entry_price, digits)
+
+                # Determine TP
+                tp_index = min(i, len(numeric_tps) - 1)
+                current_exec_tp = numeric_tps[tp_index]
+                trade_comment = f"TB SigID {message_id} Dist {i+1}/{total_trades_to_open}"
+
+                logger.info(f"{log_prefix} Placing pending limit order {i+1}/{total_trades_to_open}: Type={limit_order_type}, Vol={current_vol}, Entry={current_entry_price}, TP={current_exec_tp}")
+
+                trade_result_tuple = mt5_executor.execute_trade(
+                    action=action, symbol=trade_symbol, order_type=limit_order_type,
+                    volume=current_vol, price=current_entry_price, sl=exec_sl, tp=current_exec_tp,
+                    comment=trade_comment
+                )
+                # For pending orders, actual_exec_price is not relevant immediately
+                trade_result, _ = trade_result_tuple if trade_result_tuple else (None, None)
+
+                if trade_result and trade_result.retcode == mt5.TRADE_RETCODE_DONE:
+                    ticket = trade_result.order
+                    executed_tickets_info.append({'ticket': ticket, 'vol': current_vol, 'tp': current_exec_tp, 'entry': current_entry_price})
+                    successful_trades += 1
+                    logger.info(f"{log_prefix} Pending limit order {i+1} placed successfully. Ticket: {ticket}")
+                    # Store individual pending order info
+                    open_time = datetime.now(timezone.utc) # Placement time
+                    trade_info = {
+                        'ticket': ticket, 'symbol': trade_symbol, 'open_time': open_time,
+                        'original_msg_id': message_id, 'entry_price': current_entry_price, # The pending price
+                        'initial_sl': exec_sl, 'original_volume': current_vol,
+                        'all_tps': [current_exec_tp], 'tp_strategy': tp_strategy,
+                        'next_tp_index': 0, 'assigned_tp': current_exec_tp, 'tsl_active': False,
+                        'sequence_info': f"Dist {i+1}/{total_trades_to_open}",
+                        'is_pending': True # Mark as pending
+                    }
+                    if state_manager:
+                        state_manager.add_active_trade(trade_info, auto_tp_applied=False)
+                        # AutoSL check might need adjustment for pending orders, TBD
+                        # if config.getboolean('AutoSL', 'enable_auto_sl', fallback=False) and exec_sl is None:
+                        #     state_manager.mark_trade_for_auto_sl(ticket) # Does this work on pending?
+                    else: logger.error(f"Cannot store active trade info: StateManager not initialized.")
+                else:
+                    failed_trades += 1
+                    error_comment = getattr(trade_result, 'comment', 'Unknown Error') if trade_result else 'None Result'
+                    last_error = f"{error_comment} (Code: {getattr(trade_result, 'retcode', 'N/A')})"
+                    logger.error(f"{log_prefix} Pending limit order {i+1} FAILED. Reason: {last_error}. Result: {trade_result_tuple}")
+
+            # --- Report Distributed Limit Order Result ---
+            if successful_trades > 0:
+                status_title = f"✅ Distributed Limits Placed ({successful_trades}/{total_trades_to_open} OK)" if failed_trades == 0 else f"⚠️ Distributed Limits Partially Placed ({successful_trades}/{total_trades_to_open} OK)"
+                status_message = f"{status_title} <code>[MsgID: {message_id}]</code>\n"
+                status_message += f"<b>Symbol:</b> <code>{trade_symbol}</code> | <b>Total Vol:</b> <code>{lot_size}</code>\n"
+                status_message += f"<b>Range:</b> <code>{low_price}-{high_price}</code>\n"
+                status_message += f"<b>SL:</b> {'<code>'+str(exec_sl)+'</code>' if exec_sl else '<i>None</i>'}\n"
+                status_message += "<b>Pending Orders Placed:</b>\n"
+                for idx, trade in enumerate(executed_tickets_info):
+                    status_message += f"  <code>{idx+1}. Ticket: {trade['ticket']}, Vol: {trade['vol']}, Entry: {trade['entry']}, TP: {trade['tp']}</code>\n"
+                if failed_trades > 0:
+                    status_message += f"<b>Failures:</b> {failed_trades} order(s) failed. Last Error: {last_error}\n"
+                await telegram_sender.send_message(status_message, parse_mode='html')
+                if debug_channel_id: await telegram_sender.send_message(f"{log_prefix} Distributed limit order summary:\n{status_message}", target_chat_id=debug_channel_id, parse_mode='html')
+                duplicate_checker.add_processed_id(message_id)
+            else:
+                # All orders failed
+                status_message = f"❌ <b>Distributed Limits FAILED</b> <code>[MsgID: {message_id}]</code>\n<b>Reason:</b> All {total_trades_to_open} pending orders failed. Last Error: {last_error}"
+                logger.error(f"{log_prefix} All {total_trades_to_open} distributed pending orders failed placement.")
+                duplicate_checker.add_processed_id(message_id)
+                await telegram_sender.send_message(status_message, parse_mode='html')
+                if debug_channel_id: await telegram_sender.send_message(f"❌ {log_prefix} All distributed pending orders failed.\n{status_message}", target_chat_id=debug_channel_id, parse_mode='html')
+
+        # --- Strategy 2: Multi-Trade Market/Stop Orders (Sequential TP) ---
+        elif use_multi_trade_market_stop:
+            # --- This is the logic moved from the previous version ---
+            logger.info(f"{log_prefix} Applying multi-trade sequential TP strategy (Market/Stop). Base Split Lot: {base_split_lot}")
+            num_full_trades = int(lot_size // base_split_lot)
+            remainder_lot_raw = lot_size % base_split_lot
+            remainder_lot = round(remainder_lot_raw / lot_step) * lot_step if lot_step > 0 else remainder_lot_raw
+            if remainder_lot < min_lot: remainder_lot = 0.0
+
+            total_trades_to_open = num_full_trades + (1 if remainder_lot > 0 else 0)
+            logger.info(f"{log_prefix} Calculated Trades: {num_full_trades} x {base_split_lot} lots, Remainder: {remainder_lot} lots. Total: {total_trades_to_open}")
+
+            executed_tickets_info = []
+            failed_trades = 0
+            successful_trades = 0
+            last_error = ""
+
+            # --- Execute Full Lot Trades ---
+            for i in range(num_full_trades):
+                tp_index = min(i, len(numeric_tps) - 1)
+                current_exec_tp = numeric_tps[tp_index]
+                trade_comment = f"TB SigID {message_id} Seq {i+1}/{total_trades_to_open}"
+
+                logger.info(f"{log_prefix} Executing trade {i+1}/{total_trades_to_open}: Vol={base_split_lot}, TP={current_exec_tp}")
+                trade_result_tuple = mt5_executor.execute_trade(
+                    action=action, symbol=trade_symbol, order_type=determined_order_type,
+                    volume=base_split_lot, price=exec_price, sl=exec_sl, tp=current_exec_tp,
+                    comment=trade_comment
+                )
+                trade_result, actual_exec_price = trade_result_tuple if trade_result_tuple else (None, None)
+
+                if trade_result and trade_result.retcode == mt5.TRADE_RETCODE_DONE:
+                    ticket = trade_result.order
+                    executed_tickets_info.append({'ticket': ticket, 'vol': base_split_lot, 'tp': current_exec_tp})
+                    successful_trades += 1
+                    logger.info(f"{log_prefix} Sub-trade {i+1} executed successfully. Ticket: {ticket}")
+                    # Store individual trade info
+                    final_entry_price = actual_exec_price if actual_exec_price is not None else exec_price
+                    open_time = datetime.now(timezone.utc)
+                    trade_info = {
+                        'ticket': ticket, 'symbol': trade_symbol, 'open_time': open_time,
+                        'original_msg_id': message_id, 'entry_price': final_entry_price,
+                        'initial_sl': exec_sl, 'original_volume': base_split_lot,
+                        'all_tps': [current_exec_tp], 'tp_strategy': tp_strategy,
+                        'next_tp_index': 0, 'assigned_tp': current_exec_tp, 'tsl_active': False,
+                        'sequence_info': f"Seq {i+1}/{total_trades_to_open}"
+                    }
+                    if state_manager:
+                        state_manager.add_active_trade(trade_info, auto_tp_applied=False)
+                        if config.getboolean('AutoSL', 'enable_auto_sl', fallback=False) and exec_sl is None:
+                            state_manager.mark_trade_for_auto_sl(ticket)
+                    else: logger.error(f"Cannot store active trade info: StateManager not initialized.")
+                else:
+                    failed_trades += 1
+                    error_comment = getattr(trade_result, 'comment', 'Unknown Error') if trade_result else 'None Result'
+                    last_error = f"{error_comment} (Code: {getattr(trade_result, 'retcode', 'N/A')})"
+                    logger.error(f"{log_prefix} Sub-trade {i+1} FAILED. Reason: {last_error}. Result: {trade_result_tuple}")
+
+            # --- Execute Remainder Lot Trade ---
+            if remainder_lot > 0:
+                current_exec_tp = numeric_tps[-1]
+                trade_comment = f"TB SigID {message_id} Seq {total_trades_to_open}/{total_trades_to_open} (Rem)"
+                logger.info(f"{log_prefix} Executing remainder trade {total_trades_to_open}/{total_trades_to_open}: Vol={remainder_lot}, TP={current_exec_tp}")
+                trade_result_tuple = mt5_executor.execute_trade(
+                    action=action, symbol=trade_symbol, order_type=determined_order_type,
+                    volume=remainder_lot, price=exec_price, sl=exec_sl, tp=current_exec_tp,
+                    comment=trade_comment
+                )
+                trade_result, actual_exec_price = trade_result_tuple if trade_result_tuple else (None, None)
+
+                if trade_result and trade_result.retcode == mt5.TRADE_RETCODE_DONE:
+                    ticket = trade_result.order
+                    executed_tickets_info.append({'ticket': ticket, 'vol': remainder_lot, 'tp': current_exec_tp})
+                    successful_trades += 1
+                    logger.info(f"{log_prefix} Remainder sub-trade executed successfully. Ticket: {ticket}")
+                    # Store individual trade info
+                    final_entry_price = actual_exec_price if actual_exec_price is not None else exec_price
+                    open_time = datetime.now(timezone.utc)
+                    trade_info = {
+                        'ticket': ticket, 'symbol': trade_symbol, 'open_time': open_time,
+                        'original_msg_id': message_id, 'entry_price': final_entry_price,
+                        'initial_sl': exec_sl, 'original_volume': remainder_lot,
+                        'all_tps': [current_exec_tp], 'tp_strategy': tp_strategy,
+                        'next_tp_index': 0, 'assigned_tp': current_exec_tp, 'tsl_active': False,
+                        'sequence_info': f"Seq {total_trades_to_open}/{total_trades_to_open} (Rem)"
+                    }
+                    if state_manager:
+                        state_manager.add_active_trade(trade_info, auto_tp_applied=False)
+                        if config.getboolean('AutoSL', 'enable_auto_sl', fallback=False) and exec_sl is None:
+                            state_manager.mark_trade_for_auto_sl(ticket)
+                    else: logger.error(f"Cannot store active trade info: StateManager not initialized.")
+                else:
+                    failed_trades += 1
+                    error_comment = getattr(trade_result, 'comment', 'Unknown Error') if trade_result else 'None Result'
+                    last_error = f"{error_comment} (Code: {getattr(trade_result, 'retcode', 'N/A')})"
+                    logger.error(f"{log_prefix} Remainder sub-trade FAILED. Reason: {last_error}. Result: {trade_result_tuple}")
+
+            # --- Report Multi-Trade Market/Stop Result ---
+            if successful_trades > 0:
+                status_title = f"✅ Multi-Trade Executed ({successful_trades}/{total_trades_to_open} OK)" if failed_trades == 0 else f"⚠️ Multi-Trade Partially Executed ({successful_trades}/{total_trades_to_open} OK)"
+                status_message = f"{status_title} <code>[MsgID: {message_id}]</code>\n"
+                status_message += f"<b>Symbol:</b> <code>{trade_symbol}</code> | <b>Total Vol:</b> <code>{lot_size}</code>\n"
+                status_message += f"<b>SL:</b> {'<code>'+str(exec_sl)+'</code>' if exec_sl else '<i>None</i>'}\n"
+                status_message += "<b>Trades Opened:</b>\n"
+                for idx, trade in enumerate(executed_tickets_info):
+                    status_message += f"  <code>{idx+1}. Ticket: {trade['ticket']}, Vol: {trade['vol']}, TP: {trade['tp']}</code>\n"
+                if failed_trades > 0:
+                    status_message += f"<b>Failures:</b> {failed_trades} trade(s) failed. Last Error: {last_error}\n"
+                await telegram_sender.send_message(status_message, parse_mode='html')
+                if debug_channel_id: await telegram_sender.send_message(f"{log_prefix} Multi-trade execution summary:\n{status_message}", target_chat_id=debug_channel_id, parse_mode='html')
+                duplicate_checker.add_processed_id(message_id)
+            else:
+                # All trades failed
+                status_message = f"❌ <b>Multi-Trade Execution FAILED</b> <code>[MsgID: {message_id}]</code>\n<b>Reason:</b> All {total_trades_to_open} sub-trades failed. Last Error: {last_error}"
+                logger.error(f"{log_prefix} All {total_trades_to_open} sub-trades failed execution.")
+                duplicate_checker.add_processed_id(message_id)
+                await telegram_sender.send_message(status_message, parse_mode='html')
+                if debug_channel_id: await telegram_sender.send_message(f"❌ {log_prefix} All sub-trades failed.\n{status_message}", target_chat_id=debug_channel_id, parse_mode='html')
+
+        else:
+            # --- Strategy 3: Original Single Trade Execution Logic ---
+            logger.info(f"{log_prefix} Executing as single trade. Vol={lot_size}, TP={exec_tp}")
+            # Note: exec_price here could be None (for Market) or a specific price (for single Pending)
+            # The determined_order_type dictates how execute_trade handles it.
+            trade_result_tuple = mt5_executor.execute_trade(
+                action=action, symbol=trade_symbol, order_type=determined_order_type,
+                volume=lot_size, price=exec_price, sl=exec_sl, tp=exec_tp,
+                comment=f"TB SigID {message_id}"
+            )
+            trade_result, actual_exec_price = trade_result_tuple if trade_result_tuple else (None, None)
+
+            if trade_result and trade_result.retcode == mt5.TRADE_RETCODE_DONE:
+                ticket = trade_result.order
+                open_time = datetime.now(timezone.utc)
+                order_type_str_map = { mt5.ORDER_TYPE_BUY: "Market BUY", mt5.ORDER_TYPE_SELL: "Market SELL", mt5.ORDER_TYPE_BUY_LIMIT: "BUY LIMIT", mt5.ORDER_TYPE_SELL_LIMIT: "SELL LIMIT", mt5.ORDER_TYPE_BUY_STOP: "BUY STOP", mt5.ORDER_TYPE_SELL_STOP: "SELL STOP" }
+                order_type_str = order_type_str_map.get(determined_order_type, f"Type {determined_order_type}")
+                # Use actual_exec_price if available (for market orders), otherwise use the pending price
+                final_entry_price = actual_exec_price if actual_exec_price is not None else exec_price
+
+                entry_str = f"<code>@{final_entry_price}</code>" if final_entry_price is not None else "<code>Market</code>"
+                sl_str = f"<code>{exec_sl}</code>" if exec_sl is not None else "<i>None</i>"
+                tp_list_str = ', '.join([f"<code>{tp}</code>" if tp != "N/A" else "<i>N/A</i>" for tp in take_profits_list])
+                tp_str = f"<code>{exec_tp}</code>" if exec_tp is not None else "<i>None</i>" # TP set on this single order
+                auto_tp_label = " (Auto)" if auto_tp_applied else ""
+                symbol_str = f"<code>{trade_symbol.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')}</code>"
+                lot_str = f"<code>{lot_size}</code>"
+                ticket_str = f"<code>{ticket}</code>"
+                type_str = f"<code>{order_type_str.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')}</code>"
+
+                status_message = f"""✅ <b>Trade Executed</b> <code>[MsgID: {message_id}]</code>
 
 <b>Ticket:</b> {ticket_str}
 <b>Type:</b> {type_str}
@@ -342,53 +644,46 @@ async def process_new_signal(signal_data, message_id, state_manager: StateManage
 <b>Volume:</b> {lot_str}
 <b>Entry:</b> {entry_str}
 <b>SL:</b> {sl_str} | <b>TP(s):</b> {tp_list_str} (Initial: {tp_str}{auto_tp_label})"""
-            logger.info(f"{log_prefix} Trade executed successfully. Ticket: {ticket}")
-            await telegram_sender.send_message(status_message, parse_mode='html')
+                logger.info(f"{log_prefix} Trade executed successfully. Ticket: {ticket}")
+                await telegram_sender.send_message(status_message, parse_mode='html')
 
-            if debug_channel_id:
-                debug_msg_exec_success = f"✅ {log_prefix} Trade Executed Successfully.\n<b>Ticket:</b> <code>{ticket}</code>\n<b>Type:</b> <code>{order_type_str}</code>\n<b>Symbol:</b> <code>{trade_symbol}</code>\n<b>Volume:</b> <code>{lot_size}</code>\n<b>Entry:</b> {entry_str}\n<b>SL:</b> {sl_str}\n<b>TP:</b> {tp_str}"
-                debug_msg_exec_success = f"✅ {log_prefix} Trade Executed Successfully.\n<b>Ticket:</b> <code>{ticket}</code>\n<b>Type:</b> <code>{order_type_str}</code>\n<b>Symbol:</b> <code>{trade_symbol}</code>\n<b>Volume:</b> <code>{lot_size}</code>\n<b>Entry:</b> {entry_str}\n<b>SL:</b> {sl_str}\n<b>TP(s):</b> {tp_list_str} (Initial: {tp_str}{auto_tp_label})"
-                await telegram_sender.send_message(debug_msg_exec_success, target_chat_id=debug_channel_id, parse_mode='html') # Ensure parse_mode for debug
+                if debug_channel_id:
+                    debug_msg_exec_success = f"✅ {log_prefix} Trade Executed Successfully.\n<b>Ticket:</b> <code>{ticket}</code>\n<b>Type:</b> <code>{order_type_str}</code>\n<b>Symbol:</b> <code>{trade_symbol}</code>\n<b>Volume:</b> <code>{lot_size}</code>\n<b>Entry:</b> {entry_str}\n<b>SL:</b> {sl_str}\n<b>TP(s):</b> {tp_list_str} (Initial: {tp_str}{auto_tp_label})"
+                    await telegram_sender.send_message(debug_msg_exec_success, target_chat_id=debug_channel_id, parse_mode='html')
 
-            # Store trade info and mark for AutoSL if needed (Moved)
-            trade_info = {
-                'ticket': ticket, 'symbol': trade_symbol, 'open_time': open_time,
-                'original_msg_id': message_id, 'entry_price': final_entry_price,
-                'initial_sl': exec_sl,
-                'original_volume': lot_size,
-                'all_tps': take_profits_list,
-                'tp_strategy': tp_strategy,
-                'next_tp_index': 0,
-                'tsl_active': False # Ensure TSL flag is initialized here too
-            }
-            if state_manager:
-                state_manager.add_active_trade(trade_info, auto_tp_applied=auto_tp_applied)
-                if config.getboolean('AutoSL', 'enable_auto_sl', fallback=False) and exec_sl is None:
-                    state_manager.mark_trade_for_auto_sl(ticket)
-            else:
-                logger.error(f"Cannot store active trade info: StateManager not initialized.")
+                # Store trade info
+                trade_info = {
+                    'ticket': ticket, 'symbol': trade_symbol, 'open_time': open_time,
+                    'original_msg_id': message_id, 'entry_price': final_entry_price,
+                    'initial_sl': exec_sl, 'original_volume': lot_size,
+                    'all_tps': take_profits_list, # Store original full list for reference
+                    'tp_strategy': tp_strategy, 'next_tp_index': 0, # May not be used if single TP
+                    'assigned_tp': exec_tp, # Store the TP actually set on this trade
+                    'tsl_active': False,
+                    'is_pending': determined_order_type not in [mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL] # Mark if pending
+                }
+                if state_manager:
+                    state_manager.add_active_trade(trade_info, auto_tp_applied=auto_tp_applied)
+                    if config.getboolean('AutoSL', 'enable_auto_sl', fallback=False) and exec_sl is None and not trade_info['is_pending']:
+                        # Only mark for AutoSL if it's not pending and has no SL
+                        state_manager.mark_trade_for_auto_sl(ticket)
+                else: logger.error(f"Cannot store active trade info: StateManager not initialized.")
 
-            duplicate_checker.add_processed_id(message_id) # Mark as processed only on success
+                duplicate_checker.add_processed_id(message_id) # Mark as processed only on success
 
-            # Record market execution time if it was a market order (This check is now redundant here)
-            # Market execution time should be recorded *after* confirmation and successful execution
-            # if is_market_order and state_manager:
-            #     state_manager.record_market_execution()
-
-        else: # Execution failed (Moved)
-            error_comment = getattr(trade_result, 'comment', 'Unknown Error') if trade_result else 'None Result (Check Logs)'
-            error_code = getattr(trade_result, 'retcode', 'N/A') if trade_result else 'N/A'
-            safe_comment = str(error_comment).replace('&', '&amp;').replace('<', '<').replace('>', '>')
-            safe_code = str(error_code).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-            status_message = f"❌ <b>Trade Execution FAILED</b> <code>[MsgID: {message_id}]</code>\n<b>Reason:</b> {safe_comment} (Code: <code>{safe_code}</code>)"
-            logger.error(f"{log_prefix} Trade execution failed. Full Result: {trade_result_tuple}")
-            duplicate_checker.add_processed_id(message_id) # Mark as processed even on failure
-            await telegram_sender.send_message(status_message, parse_mode='html')
-
-            if debug_channel_id:
-                request_str = trade_result.request if trade_result else 'N/A'
-                debug_msg_exec_fail = f"❌ {log_prefix} Trade Execution FAILED.\n<b>Reason:</b> {safe_comment} (Code: <code>{safe_code}</code>)\n<b>Request:</b> <pre>{request_str}</pre>"
-                await telegram_sender.send_message(debug_msg_exec_fail, target_chat_id=debug_channel_id)
+            else: # Single Execution failed
+                error_comment = getattr(trade_result, 'comment', 'Unknown Error') if trade_result else 'None Result (Check Logs)'
+                error_code = getattr(trade_result, 'retcode', 'N/A') if trade_result else 'N/A'
+                safe_comment = str(error_comment).replace('&', '&amp;').replace('<', '<').replace('>', '>')
+                safe_code = str(error_code).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                status_message = f"❌ <b>Trade Execution FAILED</b> <code>[MsgID: {message_id}]</code>\n<b>Reason:</b> {safe_comment} (Code: <code>{safe_code}</code>)"
+                logger.error(f"{log_prefix} Trade execution failed. Full Result: {trade_result_tuple}")
+                duplicate_checker.add_processed_id(message_id) # Mark as processed even on failure
+                await telegram_sender.send_message(status_message, parse_mode='html')
+                if debug_channel_id:
+                    request_str = trade_result.request if trade_result else 'N/A'
+                    debug_msg_exec_fail = f"❌ {log_prefix} Trade Execution FAILED.\n<b>Reason:</b> {safe_comment} (Code: <code>{safe_code}</code>)\n<b>Request:</b> <pre>{request_str}</pre>"
+                    await telegram_sender.send_message(debug_msg_exec_fail, target_chat_id=debug_channel_id)
 
     except Exception as exec_err:
          logger.error(f"{log_prefix} Error during signal execution: {exec_err}", exc_info=True)

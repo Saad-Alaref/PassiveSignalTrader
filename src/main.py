@@ -3,7 +3,6 @@ import logging
 import signal
 import sys
 import os
-import configparser
 import MetaTrader5 as mt5 # Import the MT5 library
 from telethon import events # For type hinting in handler
 from datetime import datetime, timezone, timedelta # For AutoSL timing

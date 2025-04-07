@@ -63,8 +63,10 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, in
                     if reason_code == mt5.DEAL_REASON_TP:
                         close_reason = "Take Profit"
                     elif reason_code == mt5.DEAL_REASON_SL:
-                        if profit >= 0:
-                            close_reason = "Break Even / Trailing SL"
+                        if profit == 0:
+                            close_reason = "Break Even"
+                        elif profit > 0:
+                            close_reason = "Trailing Stop Loss"
                         else:
                             close_reason = "Stop Loss"
                     elif reason_code == mt5.DEAL_REASON_SO:

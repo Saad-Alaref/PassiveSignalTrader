@@ -522,7 +522,7 @@ async def process_update(analysis_result: dict, event, state_manager: StateManag
             if relevant_trades:
                 relevant_trades.sort(key=lambda x: getattr(x, 'open_time', datetime.min.replace(tzinfo=timezone.utc)), reverse=True) # Handle missing open_time
                 target_trade_info = relevant_trades[0] # Target is the latest relevant trade
-                logger.info(f"{log_prefix} Identified latest trade (Ticket: {target_trade_info.get('ticket')}, OrigMsgID: {target_trade_info.get('original_msg_id')}) as potential target for 'update' type message.")
+                logger.info(f"{log_prefix} Identified latest trade (Ticket: {target_trade_info.ticket}, OrigMsgID: {target_trade_info.original_msg_id}) as potential target for 'update' type message.")
                 update_data_obj = analysis_result.get('data') # Use data (which is UpdateData obj) from initial analysis
                 logger.debug(f"{log_prefix} Using update_data from initial analysis: {update_data}")
             else:

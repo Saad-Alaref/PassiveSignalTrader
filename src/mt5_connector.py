@@ -3,21 +3,22 @@ import sys
 import logging
 import time
 import threading
-import configparser # Import missing module
+# import configparser # No longer needed directly
+from .config_service import config_service # Import the service
 
 logger = logging.getLogger('TradeBot')
 
 class MT5Connector:
     """Handles connection and initialization with the MetaTrader 5 terminal."""
 
-    def __init__(self, config):
+    def __init__(self, config_service_instance): # Inject service
         """
-        Initializes the connector with configuration.
+        Initializes the connector with the configuration service.
 
         Args:
-            config (configparser.ConfigParser): The application configuration object.
+            config_service_instance (ConfigService): The application config service.
         """
-        self.config = config
+        self.config_service = config_service_instance # Store service instance
         self.is_initialized = False
         self.connection_lock = threading.Lock() # Ensure thread safety for connection attempts
 
@@ -36,11 +37,12 @@ class MT5Connector:
                 return True
 
             try:
-                account = int(self.config.get('MT5', 'account'))
-                password = self.config.get('MT5', 'password')
-                server = self.config.get('MT5', 'server')
-                path = self.config.get('MT5', 'path')
-            except (ValueError, configparser.NoSectionError, configparser.NoOptionError) as e:
+                # Use config_service to get MT5 details
+                account = self.config_service.getint('MT5', 'account')
+                password = self.config_service.get('MT5', 'password')
+                server = self.config_service.get('MT5', 'server')
+                path = self.config_service.get('MT5', 'path')
+            except (ValueError, TypeError, configparser.Error) as e: # Catch broader config errors
                 logger.critical(f"MT5 configuration error: {e}", exc_info=True)
                 return False
 
@@ -114,36 +116,32 @@ class MT5Connector:
             logger.error(f"Exception during MT5 connection check: {e}", exc_info=True)
             return False
 
-# Example usage (optional, for testing)
+# Example usage (optional, for testing using ConfigService)
 if __name__ == '__main__':
-    import configparser
+    # import configparser # No longer needed directly
     import os
     from logger_setup import setup_logging
+    from config_service import ConfigService # Import the service class for testing
 
     # Setup basic logging for test
     test_log_path = os.path.join(os.path.dirname(__file__), '..', 'logs', 'mt5_connector_test.log')
     setup_logging(log_file_path=test_log_path, log_level_str='DEBUG')
 
-    # Load dummy config (replace with actual config for real test)
-    example_config_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'config.example.ini')
-    if not os.path.exists(example_config_path):
-        print(f"ERROR: config.example.ini not found at {example_config_path}. Cannot run test.")
+    # --- IMPORTANT: Ensure config/config.ini exists and has REAL MT5 details for this test ---
+    try:
+        # Instantiate ConfigService directly for the test
+        test_config_service = ConfigService(config_file='../config/config.ini') # Adjust path if needed
+    except Exception as e:
+        print(f"ERROR: Failed to load config/config.ini for testing: {e}")
         sys.exit(1)
 
-    config = configparser.ConfigParser()
-    config.read(example_config_path)
-    # --- IMPORTANT: Fill in REAL MT5 details in config.example.ini for this test to work ---
-    # config['MT5']['account'] = 'YOUR_REAL_ACCOUNT'
-    # config['MT5']['password'] = 'YOUR_REAL_PASSWORD'
-    # config['MT5']['server'] = 'YOUR_REAL_SERVER'
-    # config['MT5']['path'] = r'C:\...' # Your actual path
+    # Check if dummy values might still be present (optional check)
+    if 'YOUR_' in test_config_service.get('MT5', 'account', fallback=''):
+         print("WARNING: Dummy MT5 credentials might be present in config.ini. Connection test may fail.")
+         print("Please ensure config/config.ini has real credentials.")
 
-    if not config.get('MT5', 'account') or 'YOUR_' in config.get('MT5', 'account'):
-         print("WARNING: Dummy MT5 credentials found in config. Connection test will likely fail.")
-         print("Please edit config/config.example.ini with real credentials to test connection.")
-         # sys.exit(1) # Optionally exit if real creds are mandatory for test
-
-    connector = MT5Connector(config)
+    # Instantiate connector with the test service instance
+    connector = MT5Connector(test_config_service)
 
     print("Attempting initial connection...")
     if connector.connect():

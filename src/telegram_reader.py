@@ -3,7 +3,8 @@ import asyncio
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, FloodWaitError, UserDeactivatedBanError, AuthKeyError # Removed RpcError
 from telethon.sessions import StringSession
-import configparser
+# import configparser # No longer needed directly
+from .config_service import config_service # Import the service
 import sys
 import getpass # For password input if needed
 logger = logging.getLogger('TradeBot')
@@ -13,23 +14,23 @@ logger = logging.getLogger('TradeBot')
 class TelegramReader:
     """Handles connection to Telegram as a USER account to monitor a specific channel."""
 
-    def __init__(self, config: configparser.ConfigParser, message_handler_callback): # Removed confirmation_handler_callback
+    def __init__(self, config_service_instance, message_handler_callback): # Inject service
         """
         Initializes the TelegramReader. Connects as a USER.
 
         Args:
-            config (configparser.ConfigParser): The application configuration.
+            config_service_instance (ConfigService): The application config service.
             message_handler_callback (callable): An async function to call for new/edited messages.
                                                  Accepts the Telethon event object.
         """
-        self.config = config
+        self.config_service = config_service_instance # Store service instance
         # Read required fields - validation ensures they exist
         # self.bot_token = config.get('Telegram', 'bot_token') # No longer needed for reader
-        self.channel_id_config = config.get('Telegram', 'channel_id')
+        self.channel_id_config = self.config_service.get('Telegram', 'channel_id') # Use service
         try:
             # api_id must be int, api_hash is string
-            self.api_id = config.getint('Telegram', 'api_id')
-            self.api_hash = config.get('Telegram', 'api_hash')
+            self.api_id = self.config_service.getint('Telegram', 'api_id') # Use service
+            self.api_hash = self.config_service.get('Telegram', 'api_hash') # Use service
         except ValueError as e:
              logger.critical(f"Invalid api_id in config (must be an integer): {e}")
              raise ValueError("Invalid api_id in config") from e
@@ -205,20 +206,33 @@ class TelegramReader:
 if __name__ == '__main__':
     # ... (imports for test) ...
     from datetime import datetime # Import needed for test handler
-    # ... (logging setup for test) ...
+    from logger_setup import setup_logging
+    from config_service import ConfigService # Import service for testing
 
-    # ... (config loading for test) ...
+    # ... (logging setup for test) ...
+    test_log_path = os.path.join(os.path.dirname(__file__), '..', 'logs', 'reader_test.log')
+    setup_logging(log_file_path=test_log_path, log_level_str='DEBUG')
+
+
+    # --- IMPORTANT: Ensure config/config.ini exists for this test ---
+    try:
+        # Instantiate ConfigService directly for the test
+        test_config_service = ConfigService(config_file='../config/config.ini') # Adjust path if needed
+    except Exception as e:
+        print(f"ERROR: Failed to load config/config.ini for testing: {e}")
+        sys.exit(1)
+
 
     async def test_message_handler(event):
-        # ... (existing test_handler logic for messages) ...
+        print(f"[{datetime.now()}] Received Event: ID={event.id}, Text='{event.text[:50]}...'")
         pass
 
 
     async def main_test():
         reader = None # Initialize reader to None
         try:
-            # Pass both handlers to the constructor
-            reader = TelegramReader(config, test_message_handler) # Removed confirmation handler
+            # Pass service instance to the constructor
+            reader = TelegramReader(test_config_service, test_message_handler)
             success = await reader.start()
             if success:
                 print("Reader started successfully. Listening for events... Press Ctrl+C to stop.")

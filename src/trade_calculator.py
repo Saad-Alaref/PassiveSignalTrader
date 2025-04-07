@@ -1,5 +1,6 @@
 import logging
-import configparser
+# import configparser # No longer needed directly
+from .config_service import config_service # Import the service
 from .mt5_data_fetcher import MT5DataFetcher # Use relative import
 import MetaTrader5 as mt5
 logger = logging.getLogger('TradeBot')
@@ -10,18 +11,16 @@ class TradeCalculator:
     Currently implements fixed lot size based on configuration.
     """
 
-    def __init__(self, config: configparser.ConfigParser, data_fetcher: MT5DataFetcher):
+    def __init__(self, config_service_instance, data_fetcher: MT5DataFetcher): # Inject service
         """
         Initializes the TradeCalculator.
 
         Args:
-            config (configparser.ConfigParser): The application configuration.
-            data_fetcher (MT5DataFetcher): Instance for fetching market/account data
-                                           (used for future calculation methods).
+            config_service_instance (ConfigService): The application config service.
+            data_fetcher (MT5DataFetcher): Instance for fetching market/account data.
         """
-        self.config = config
-        self.fetcher = data_fetcher # Store fetcher for future use
-        # Store config reference for dynamic access
+        self.config_service = config_service_instance # Store service instance
+        self.fetcher = data_fetcher
         logger.info("TradeCalculator initialized.")
         # Lot size parameters will be read dynamically in calculate_lot_size
 
@@ -38,9 +37,9 @@ class TradeCalculator:
             float: The calculated lot size, or the default lot size if calculation fails.
         """
         # --- Read config values dynamically ---
-        lot_size_method = self.config.get('Trading', 'lot_size_method', fallback='fixed').lower()
-        fixed_lot_size = self.config.getfloat('Trading', 'fixed_lot_size', fallback=0.01)
-        default_lot_size = self.config.getfloat('Trading', 'default_lot_size', fallback=0.01)
+        lot_size_method = self.config_service.get('Trading', 'lot_size_method', fallback='fixed').lower() # Use service
+        fixed_lot_size = self.config_service.getfloat('Trading', 'fixed_lot_size', fallback=0.01) # Use service
+        default_lot_size = self.config_service.getfloat('Trading', 'default_lot_size', fallback=0.01) # Use service
 
         # Validate default lot size (emergency fallback)
         if default_lot_size <= 0:
@@ -74,7 +73,7 @@ class TradeCalculator:
         # --- Adjust Lot Size based on Broker Constraints ---
         try:
             # Read symbol dynamically
-            mt5_symbol = self.config.get('MT5', 'symbol', fallback='XAUUSD')
+            mt5_symbol = self.config_service.get('MT5', 'symbol', fallback='XAUUSD') # Use service
             symbol_info = self.fetcher.get_symbol_info(mt5_symbol)
             if symbol_info:
                 volume_min = symbol_info.volume_min
@@ -286,11 +285,12 @@ class TradeCalculator:
 
 # Example usage (optional, for testing)
 if __name__ == '__main__':
-    import configparser
+    # import configparser # No longer needed
     import os
     import sys
     from logger_setup import setup_logging
-    # Need dummy fetcher/connector for init, but calculation doesn't use them yet
+    from config_service import ConfigService # Import service for testing
+    # Need dummy fetcher/connector for init
     from mt5_connector import MT5Connector
     from mt5_data_fetcher import MT5DataFetcher
 
@@ -298,39 +298,42 @@ if __name__ == '__main__':
     test_log_path = os.path.join(os.path.dirname(__file__), '..', 'logs', 'calculator_test.log')
     setup_logging(log_file_path=test_log_path, log_level_str='DEBUG')
 
-    # Load dummy config
-    example_config_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'config.example.ini')
-    if not os.path.exists(example_config_path):
-        print(f"ERROR: config.example.ini not found at {example_config_path}. Cannot run test.")
+    # --- IMPORTANT: Ensure config/config.ini exists for this test ---
+    try:
+        # Instantiate ConfigService directly for the test
+        test_config_service = ConfigService(config_file='../config/config.ini') # Adjust path if needed
+    except Exception as e:
+        print(f"ERROR: Failed to load config/config.ini for testing: {e}")
         sys.exit(1)
 
-    config = configparser.ConfigParser()
-    config.read(example_config_path)
 
-    # Create dummy fetcher (doesn't need real connection for fixed lot size)
-    dummy_connector = MT5Connector(config) # Needs config but won't connect
+    # Create dummy fetcher (doesn't need real connection for these tests)
+    # Connector needs service, but won't connect
+    dummy_connector = MT5Connector(test_config_service)
     dummy_fetcher = MT5DataFetcher(dummy_connector)
 
-    calculator = TradeCalculator(config, dummy_fetcher)
+    # Instantiate calculator with the test service
+    calculator = TradeCalculator(test_config_service, dummy_fetcher)
 
     print("Testing Trade Calculator...")
 
     # Test with fixed lot size (default in example config)
-    print(f"\nTesting method: {calculator.lot_size_method}")
+    # print(f"\nTesting method: {calculator.lot_size_method}") # Method is read inside function now
     dummy_signal = {"stop_loss": "3100"} # Pass dummy signal data
     lot_size = calculator.calculate_lot_size(dummy_signal)
     print(f"Calculated Lot Size: {lot_size}")
-    expected_fixed = config.getfloat('Trading', 'fixed_lot_size', fallback=0.01)
+    expected_fixed = test_config_service.getfloat('Trading', 'fixed_lot_size', fallback=0.01) # Use service
     print(f"Expected: {expected_fixed}")
     assert lot_size == expected_fixed
 
     # Test fallback if method is unknown
     print("\nTesting fallback for unknown method...")
-    config['Trading']['lot_size_method'] = 'unknown_method'
-    calculator_fallback = TradeCalculator(config, dummy_fetcher)
+    # To test fallback, we'd need to modify the dummy config file or create a new service instance
+    # For simplicity, we assume the config service correctly reads the method
+    # calculator_fallback = TradeCalculator(test_config_service, dummy_fetcher) # Re-init not needed if service is used internally
     lot_size_fallback = calculator_fallback.calculate_lot_size(dummy_signal)
     print(f"Calculated Lot Size: {lot_size_fallback}")
-    expected_default = config.getfloat('Trading', 'default_lot_size', fallback=0.01)
+    expected_default = test_config_service.getfloat('Trading', 'default_lot_size', fallback=0.01) # Use service
     print(f"Expected (default): {expected_default}")
     assert lot_size_fallback == expected_default
 

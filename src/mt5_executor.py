@@ -1,7 +1,8 @@
 import MetaTrader5 as mt5
 import logging
 import time
-import configparser
+from .config_service import config_service # Import the service
+from .config_service import config_service # Import the service
 from .mt5_connector import MT5Connector # Use relative import
 
 logger = logging.getLogger('TradeBot')
@@ -9,22 +10,20 @@ logger = logging.getLogger('TradeBot')
 class MT5Executor:
     """Handles sending trade orders and modifications to the MT5 terminal."""
 
-    def __init__(self, config: configparser.ConfigParser, connector: MT5Connector):
+    def __init__(self, config_service_instance, connector: MT5Connector): # Inject service
         """
         Initializes the MT5Executor.
 
         Args:
-            config (configparser.ConfigParser): The application configuration.
+            config_service_instance (ConfigService): The application config service.
             connector (MT5Connector): The MT5Connector instance.
         """
-        self.config = config
+        self.config_service = config_service_instance # Store service instance
         self.connector = connector
-        self.symbol = config.get('MT5', 'symbol', fallback='XAUUSD')
-        # Manually strip comments before converting int values
-        retry_attempts_str = config.get('Retries', 'requote_retry_attempts', fallback='5').split('#')[0].strip()
-        retry_delay_str = config.get('Retries', 'requote_retry_delay_seconds', fallback='4').split('#')[0].strip()
-        self.requote_retries = int(retry_attempts_str)
-        self.requote_delay = int(retry_delay_str)
+        self.symbol = self.config_service.get('MT5', 'symbol', fallback='XAUUSD') # Use service
+        # Get retry settings using the service
+        self.requote_retries = self.config_service.getint('Retries', 'requote_retry_attempts', fallback=3) # Use getint
+        self.requote_delay = self.config_service.getint('Retries', 'requote_retry_delay_seconds', fallback=2) # Use getint
         # Slippage/deviation will be read dynamically
 
     def _send_order_with_retry(self, request):
@@ -209,7 +208,7 @@ class MT5Executor:
             request["action"] = mt5.TRADE_ACTION_DEAL
             # Price is ignored by server for market orders
             # Read deviation dynamically for market orders
-            deviation = self.config.getint('Trading', 'max_slippage', fallback=10)
+            deviation = self.config_service.getint('Trading', 'max_slippage', fallback=10) # Use service
             request["deviation"] = deviation # Slippage for market orders
         elif order_type in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP, mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP]: # Pending Order
             request["action"] = mt5.TRADE_ACTION_PENDING
@@ -446,7 +445,7 @@ class MT5Executor:
             "volume": close_volume,
             "type": close_order_type,
             "price": mt5.symbol_info_tick(pos.symbol).ask if close_order_type == mt5.ORDER_TYPE_BUY else mt5.symbol_info_tick(pos.symbol).bid, # Current market price for closing
-            "deviation": self.config.getint('Trading', 'max_slippage', fallback=10), # Read slippage dynamically
+            "deviation": self.config_service.getint('Trading', 'max_slippage', fallback=10), # Use service
             "magic": pos.magic, # Use the magic number of the original position
             "comment": comment,
             "type_time": mt5.ORDER_TIME_GTC,
@@ -579,32 +578,38 @@ class MT5Executor:
 
 # Example usage (optional, for testing)
 if __name__ == '__main__':
-    import configparser
+    # import configparser # No longer needed directly
     import os
     import sys
     from logger_setup import setup_logging
     from mt5_connector import MT5Connector
+    from config_service import ConfigService # Import service for testing
 
     # Setup basic logging for test
     test_log_path = os.path.join(os.path.dirname(__file__), '..', 'logs', 'mt5_executor_test.log')
     setup_logging(log_file_path=test_log_path, log_level_str='DEBUG')
 
-    # Load dummy config
-    example_config_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'config.example.ini')
-    if not os.path.exists(example_config_path):
-        print(f"ERROR: config.example.ini not found at {example_config_path}. Cannot run test.")
+    # --- IMPORTANT: Ensure config/config.ini exists and has REAL MT5 details for this test ---
+    try:
+        # Instantiate ConfigService directly for the test
+        test_config_service = ConfigService(config_file='../config/config.ini') # Adjust path if needed
+    except Exception as e:
+        print(f"ERROR: Failed to load config/config.ini for testing: {e}")
         sys.exit(1)
 
-    config = configparser.ConfigParser()
-    config.read(example_config_path)
-    # --- IMPORTANT: Fill in REAL MT5 details in config.example.ini for this test to work ---
+    # Check if dummy values might still be present (optional check)
+    if 'YOUR_' in test_config_service.get('MT5', 'account', fallback=''):
+         print("WARNING: Dummy MT5 credentials might be present in config.ini. Connection test may fail.")
+         print("Please ensure config/config.ini has real credentials.")
 
-    if 'YOUR_' in config.get('MT5', 'account', fallback=''):
-         print("WARNING: Dummy MT5 credentials found in config. Executor test needs a live connection.")
-         # sys.exit(1) # Optionally exit
-
-    connector = MT5Connector(config)
-    executor = MT5Executor(config, connector)
+    # Instantiate connector and executor with the test service instance
+    connector = MT5Connector(test_config_service)
+    # Need to pass MT5Fetcher instance - for testing, we might need a mock or basic instance
+    # For simplicity, let's assume MT5Fetcher doesn't rely heavily on config *during executor tests*
+    # This might need adjustment based on MT5Fetcher's implementation
+    from mt5_data_fetcher import MT5DataFetcher
+    fetcher = MT5DataFetcher(connector) # Basic fetcher instance
+    executor = MT5Executor(test_config_service, fetcher) # Pass service and fetcher
 
     print("Connecting MT5 for Executor test...")
     if not connector.connect():
@@ -612,7 +617,7 @@ if __name__ == '__main__':
         sys.exit(1)
     print("MT5 Connected.")
 
-    symbol = config.get('MT5', 'symbol')
+    symbol = test_config_service.get('MT5', 'symbol') # Use service
     volume = 0.01 # Use minimum volume for testing
 
     # --- Test Cases ---

@@ -5,6 +5,8 @@ from .state_manager import StateManager # Use relative import
 from .mt5_executor import MT5Executor # Use relative import
 from .trade_calculator import TradeCalculator # Use relative import
 from .telegram_sender import TelegramSender # Use relative import
+from .models import TradeInfo # Import the dataclass
+from .config_service import config_service # Import the service
 
 logger = logging.getLogger('TradeBot')
 
@@ -13,9 +15,9 @@ class TradeManager:
     Manages trade-related operations like applying AutoSL, AutoBE, and handling TPs.
     """
 
-    def __init__(self, config, state_manager: StateManager, mt5_executor: MT5Executor,
+    def __init__(self, config_service_instance, state_manager: StateManager, mt5_executor: MT5Executor, # Inject service
                  trade_calculator: TradeCalculator, telegram_sender: TelegramSender,
-                 mt5_fetcher): # Added mt5_fetcher
+                 mt5_fetcher):
         """
         Initializes the TradeManager.
 
@@ -27,7 +29,7 @@ class TradeManager:
             telegram_sender (TelegramSender): Instance for sending notifications.
             mt5_fetcher (MT5DataFetcher): Instance for fetching market data.
         """
-        self.config = config # Store shared config reference
+        self.config_service = config_service_instance # Store service instance
         self.state_manager = state_manager
         self.mt5_executor = mt5_executor
         self.trade_calculator = trade_calculator
@@ -35,32 +37,32 @@ class TradeManager:
         self.mt5_fetcher = mt5_fetcher # Store fetcher
         logger.info("TradeManager initialized.")
 
-    async def check_and_apply_auto_sl(self, position, trade_info):
+    async def check_and_apply_auto_sl(self, position, trade_info: TradeInfo): # Type hint
         """
         Checks a specific trade pending AutoSL and applies SL if conditions are met.
         Called periodically by the main monitor task.
 
         Args:
             position (mt5.PositionInfo): The current position data from MT5.
-            trade_info (dict): The internally tracked trade data from StateManager.
+            trade_info (TradeInfo): The internally tracked trade data object from StateManager.
         """
         # --- Read AutoSL config dynamically ---
-        enable_auto_sl = self.config.getboolean('AutoSL', 'enable_auto_sl', fallback=False)
+        enable_auto_sl = self.config_service.getboolean('AutoSL', 'enable_auto_sl', fallback=False) # Use service
         if not enable_auto_sl:
             return # Feature disabled
 
-        auto_sl_delay_sec = self.config.getint('AutoSL', 'auto_sl_delay_seconds', fallback=60)
-        auto_sl_distance = self.config.getfloat('AutoSL', 'auto_sl_price_distance', fallback=5.0)
+        auto_sl_delay_sec = self.config_service.getint('AutoSL', 'auto_sl_delay_seconds', fallback=60) # Use service
+        auto_sl_distance = self.config_service.getfloat('AutoSL', 'auto_sl_price_distance', fallback=5.0) # Use service
         # --- End Read AutoSL config ---
 
         now_utc = datetime.now(timezone.utc)
 
         # Check if this specific trade is marked for AutoSL
-        pending_timestamp = trade_info.get('auto_sl_pending_timestamp')
+        pending_timestamp = trade_info.auto_sl_pending_timestamp # Use attribute access
         if not pending_timestamp:
             return # Not pending for this trade
 
-        ticket = trade_info['ticket']
+        ticket = trade_info.ticket # Use attribute access
         log_prefix_auto_sl = f"[AutoSL Check][Ticket: {ticket}]"
         needs_flag_removal = False # Flag to indicate if pending flag should be removed after checks
 
@@ -138,22 +140,22 @@ class TradeManager:
             self.state_manager.remove_auto_sl_pending_flag(ticket)
 
 
-    async def check_and_apply_auto_be(self, position, trade_info):
+    async def check_and_apply_auto_be(self, position, trade_info: TradeInfo): # Type hint
         """
         Checks if a trade's profit meets the threshold and moves SL to breakeven.
         Called periodically by the main monitor task.
 
         Args:
             position (mt5.PositionInfo): The current position data from MT5.
-            trade_info (dict): The internally tracked trade data from StateManager.
+            trade_info (TradeInfo): The internally tracked trade data object from StateManager.
         """
         # --- Read AutoBE config dynamically ---
-        enable_auto_be = self.config.getboolean('AutoBE', 'enable_auto_be', fallback=False)
+        enable_auto_be = self.config_service.getboolean('AutoBE', 'enable_auto_be', fallback=False) # Use service
         if not enable_auto_be:
             return # Feature disabled
 
-        profit_threshold_config = self.config.getfloat('AutoBE', 'auto_be_profit_usd', fallback=3.0)
-        base_lot_size = self.config.getfloat('Trading', 'base_lot_size_for_usd_targets', fallback=0.01)
+        profit_threshold_config = self.config_service.getfloat('AutoBE', 'auto_be_profit_usd', fallback=3.0) # Use service
+        base_lot_size = self.config_service.getfloat('Trading', 'base_lot_size_for_usd_targets', fallback=0.01) # Use service
 
         if profit_threshold_config <= 0:
             logger.warning("AutoBE profit threshold (auto_be_profit_usd) is zero or negative, disabling check.")
@@ -214,7 +216,7 @@ class TradeManager:
             logger.error(f"{log_prefix_auto_be} Failed to apply AutoBE via modify_sl_to_breakeven.")
 
 
-    async def check_and_apply_trailing_stop(self, position, trade_info):
+    async def check_and_apply_trailing_stop(self, position, trade_info: TradeInfo): # Type hint
         """
         Checks if a trade qualifies for Trailing Stop Loss (TSL) activation or update,
         and applies the TSL if conditions are met.
@@ -222,16 +224,16 @@ class TradeManager:
 
         Args:
             position (mt5.PositionInfo): The current position data from MT5.
-            trade_info (dict): The internally tracked trade data from StateManager.
+            trade_info (TradeInfo): The internally tracked trade data object from StateManager.
         """
         # --- Read TrailingStop config dynamically ---
-        enable_tsl = self.config.getboolean('TrailingStop', 'enable_trailing_stop', fallback=False)
+        enable_tsl = self.config_service.getboolean('TrailingStop', 'enable_trailing_stop', fallback=False) # Use service
         if not enable_tsl:
             return # Feature disabled
 
-        activation_profit_config = self.config.getfloat('TrailingStop', 'activation_profit_usd', fallback=10.0)
-        trail_distance_config = self.config.getfloat('TrailingStop', 'trail_distance_price', fallback=5.0) # NOTE: Config key name needs update if not done yet
-        base_lot_size = self.config.getfloat('Trading', 'base_lot_size_for_usd_targets', fallback=0.01)
+        activation_profit_config = self.config_service.getfloat('TrailingStop', 'activation_profit_usd', fallback=10.0) # Use service
+        trail_distance_config = self.config_service.getfloat('TrailingStop', 'trail_distance_price', fallback=5.0) # Use service
+        base_lot_size = self.config_service.getfloat('Trading', 'base_lot_size_for_usd_targets', fallback=0.01) # Use service
 
         if activation_profit_config <= 0 or trail_distance_config <= 0:
             logger.warning("TrailingStop activation_profit_usd or trail_distance_usd is zero or negative. TSL disabled.")
@@ -255,7 +257,7 @@ class TradeManager:
         trade_type = position.type
         volume = position.volume
         symbol = position.symbol
-        tsl_active = trade_info.get('tsl_active', False) # Get current TSL status
+        tsl_active = trade_info.tsl_active # Use attribute access
 
         log_prefix_tsl = f"[TSL Check][Ticket: {ticket}]"
 
@@ -319,7 +321,7 @@ class TradeManager:
 
                 if not apply_initial_tsl:
                      logger.info(f"{log_prefix_tsl} Existing SL ({current_sl}) is already better than calculated initial TSL ({new_tsl_price}). Activating TSL flag without modifying SL.")
-                     trade_info['tsl_active'] = True # Activate TSL tracking even if SL not moved initially
+                     trade_info.tsl_active = True # Use attribute access
                      return
 
                 # --- Apply Initial TSL ---
@@ -328,7 +330,7 @@ class TradeManager:
 
                 if modify_success:
                     logger.info(f"{log_prefix_tsl} Successfully applied initial TSL: {new_tsl_price}")
-                    trade_info['tsl_active'] = True # Mark TSL as active in state
+                    trade_info.tsl_active = True # Use attribute access
 
                     # Send notifications
                     entry_price_str = f"@{entry_price}"
@@ -396,18 +398,18 @@ class TradeManager:
 
 
 
-    async def check_and_handle_tp_hits(self, position, trade_info):
+    async def check_and_handle_tp_hits(self, position, trade_info: TradeInfo): # Type hint
         """
         Checks a specific active trade for TP hits and handles based on configured strategy.
         Called periodically by the main monitor task.
 
         Args:
             position (mt5.PositionInfo): The current position data from MT5.
-            trade_info (dict): The internally tracked trade data from StateManager.
+            trade_info (TradeInfo): The internally tracked trade data object from StateManager.
         """
         # --- Read config dynamically ---
-        partial_close_perc = self.config.getint('Strategy', 'partial_close_percentage', fallback=50)
-        tp_strategy = self.config.get('Strategy', 'tp_execution_strategy', fallback='first_tp_full_close').lower()
+        partial_close_perc = self.config_service.getint('Strategy', 'partial_close_percentage', fallback=50) # Use service
+        tp_strategy = self.config_service.get('Strategy', 'tp_execution_strategy', fallback='first_tp_full_close').lower() # Use service
         # --- End Read config ---
 
         # --- Skip check if strategy doesn't involve monitoring TPs after entry ---
@@ -424,11 +426,11 @@ class TradeManager:
             return
 
         ticket = position.ticket
-        symbol = position.symbol
-        all_tps = trade_info.get('all_tps', [])
-        next_tp_index = trade_info.get('next_tp_index', 0)
-        original_volume = trade_info.get('original_volume')
-        original_msg_id = trade_info.get('original_msg_id', 'N/A')
+        symbol = trade_info.symbol # Use attribute access
+        all_tps = trade_info.all_tps # Use attribute access
+        next_tp_index = trade_info.next_tp_index # Use attribute access
+        original_volume = trade_info.original_volume # Use attribute access
+        original_msg_id = trade_info.original_msg_id # Use attribute access
 
         log_prefix_tp = f"[TP Check][Ticket: {ticket}]"
 
@@ -448,7 +450,7 @@ class TradeManager:
             current_tp_target = float(current_tp_target_str)
         except (ValueError, TypeError):
             logger.warning(f"{log_prefix_tp} Invalid TP value '{current_tp_target_str}' at index {next_tp_index}. Skipping TP check for this level.")
-            trade_info['next_tp_index'] += 1 # Move to next index
+            trade_info.next_tp_index += 1 # Use attribute access
             return
 
         # Get current market price
@@ -496,14 +498,14 @@ class TradeManager:
 
             if close_success:
                 logger.info(f"{log_prefix_tp} {action_desc} successful for {volume_to_close} lots.")
-                trade_info['next_tp_index'] += 1 # Move to next TP index
+                trade_info.next_tp_index += 1 # Use attribute access
 
                 next_tp_value_for_modify = None
                 next_tp_display = "<i>None</i>"
 
                 # If not the last TP, modify remaining position to next TP
                 if not is_last_tp:
-                    next_tp_index_for_modify = trade_info['next_tp_index']
+                    next_tp_index_for_modify = trade_info.next_tp_index # Use attribute access
                     if next_tp_index_for_modify < len(all_tps) and all_tps[next_tp_index_for_modify] != "N/A":
                         try:
                             next_tp_value_for_modify = float(all_tps[next_tp_index_for_modify])

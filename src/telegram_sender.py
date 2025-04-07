@@ -3,7 +3,8 @@ import asyncio
 import re # For parsing callback data
 import html # For escaping HTML
 import uuid # To generate unique IDs for confirmations
-import configparser
+# import configparser # No longer needed directly
+from .config_service import config_service # Import the service
 import sys
 from datetime import datetime, timezone, timedelta
 
@@ -27,31 +28,31 @@ class TelegramSender:
     and now also handles callback queries from its own messages.
     """
 
-    def __init__(self, config: configparser.ConfigParser,
+    def __init__(self, config_service_instance, # Inject service
                  state_manager: StateManager, mt5_executor: MT5Executor,
-                 mt5_connector: MT5Connector, mt5_fetcher: MT5DataFetcher): # Added mt5_fetcher
+                 mt5_connector: MT5Connector, mt5_fetcher: MT5DataFetcher):
         """
         Initializes the TelegramSender. Connects as a BOT.
 
         Args:
-            config (configparser.ConfigParser): The application configuration.
+            config_service_instance (ConfigService): The application config service.
             state_manager (StateManager): Instance for managing state.
             mt5_executor (MT5Executor): Instance for executing trades.
             mt5_connector (MT5Connector): Instance for MT5 connection checks.
             mt5_fetcher (MT5DataFetcher): Instance for fetching market data.
         """
-        self.config = config
+        self.config_service = config_service_instance # Store service instance
         self.state_manager = state_manager
         self.mt5_executor = mt5_executor
         self.mt5_connector = mt5_connector
         self.mt5_fetcher = mt5_fetcher # Store mt5_fetcher
 
         # Need api_id/hash even for bot connection via Telethon library
-        self.api_id = config.getint('Telegram', 'api_id')
-        self.api_hash = config.get('Telegram', 'api_hash')
-        self.bot_token = config.get('Telegram', 'bot_token', fallback=None)
-        self.channel_id_config = config.get('Telegram', 'channel_id') # Main channel
-        self.debug_channel_id_config = config.get('Telegram', 'debug_channel_id', fallback=None) # Optional debug channel
+        self.api_id = self.config_service.getint('Telegram', 'api_id')
+        self.api_hash = self.config_service.get('Telegram', 'api_hash')
+        self.bot_token = self.config_service.get('Telegram', 'bot_token', fallback=None)
+        self.channel_id_config = self.config_service.get('Telegram', 'channel_id') # Main channel
+        self.debug_channel_id_config = self.config_service.get('Telegram', 'debug_channel_id', fallback=None) # Optional debug channel
 
         if not self.bot_token:
             logger.critical("Telegram bot_token not found in configuration. TelegramSender cannot function.")
@@ -378,7 +379,7 @@ class TelegramSender:
 
             # 2. Check Expiry
             logger.debug(f"{log_prefix} Checking expiry...")
-            timeout_minutes = self.config.getint('Trading', 'market_confirmation_timeout_minutes', fallback=3)
+            timeout_minutes = self.config_service.getint('Trading', 'market_confirmation_timeout_minutes', fallback=3) # Use service
             expiry_time = conf_timestamp + timedelta(minutes=timeout_minutes)
             now = datetime.now(timezone.utc)
 
@@ -486,13 +487,13 @@ class TelegramSender:
                             'original_msg_id': original_signal_msg_id, 'entry_price': final_entry_price,
                             'initial_sl': trade_params.get('sl'), 'original_volume': trade_params['volume'],
                             'all_tps': [], # TODO: Need original TPs here
-                            'tp_strategy': self.config.get('Strategy', 'tp_execution_strategy', fallback='first_tp_full_close').lower(),
+                            'tp_strategy': self.config_service.get('Strategy', 'tp_execution_strategy', fallback='first_tp_full_close').lower(), # Use service
                             'next_tp_index': 0, 'tsl_active': False
                         }
                         if self.state_manager:
                             auto_tp_was_applied = trade_params.get('auto_tp_applied', False)
                             self.state_manager.add_active_trade(trade_info, auto_tp_applied=auto_tp_was_applied)
-                            if self.config.getboolean('AutoSL', 'enable_auto_sl', fallback=False) and trade_params.get('sl') is None:
+                            if self.config_service.getboolean('AutoSL', 'enable_auto_sl', fallback=False) and trade_params.get('sl') is None: # Use service
                                 self.state_manager.mark_trade_for_auto_sl(ticket)
                             logger.debug(f"{log_prefix} Active trade info stored.")
                         else:

@@ -1,7 +1,7 @@
 import logging
 import MetaTrader5 as mt5 # For order type constants
 from .mt5_data_fetcher import MT5DataFetcher # Use relative import
-
+from .models import SignalData # Import the dataclass
 logger = logging.getLogger('TradeBot')
 
 class DecisionLogic:
@@ -10,29 +10,26 @@ class DecisionLogic:
     in a trade order, based on signal type, LLM sentiment, and price action.
     """
 
-    def __init__(self, config, data_fetcher: MT5DataFetcher):
+    def __init__(self, config_service_instance, data_fetcher: MT5DataFetcher): # Inject service
         """
         Initializes the DecisionLogic component.
 
         Args:
-            config (configparser.ConfigParser): The application configuration.
+            config_service_instance (ConfigService): The application config service.
             data_fetcher (MT5DataFetcher): Instance for fetching market data.
         """
-        self.config = config
+        self.config_service = config_service_instance # Store service instance
         self.fetcher = data_fetcher
-        # Store config reference for dynamic access
         logger.info("DecisionLogic initialized.")
         # Configuration values will be read dynamically in the 'decide' method
 
 
-    def decide(self, signal_data: dict):
+    def decide(self, signal_data: SignalData): # Use type hint
         """
         Makes the decision whether to proceed with a trade based on the signal data.
 
         Args:
-            signal_data (dict): The structured data returned by SignalAnalyzer, containing
-                                keys like 'is_signal', 'action', 'entry_type', 'entry_price',
-                                'sentiment_score', etc.
+            signal_data (SignalData): The structured data object returned by SignalAnalyzer.
 
         Returns:
             tuple: (bool, str or None, int or None)
@@ -41,12 +38,12 @@ class DecisionLogic:
                    - int or None: The determined MT5 order type (e.g., mt5.ORDER_TYPE_BUY_LIMIT)
                                   if it's a pending order, None otherwise.
         """
-        if not signal_data or not signal_data.get('is_signal'):
+        if not signal_data or not signal_data.is_signal: # Use attribute access
             logger.debug("Decision: Not a signal or no data provided.")
             return False, "Not a signal", None
 
-        entry_type = signal_data.get('entry_type')
-        action = signal_data.get('action') # BUY or SELL
+        entry_type = signal_data.entry_type # Use attribute access
+        action = signal_data.action # Use attribute access
 
         # --- Path 1: Market Execution Signals ---
         if entry_type == "Market":
@@ -60,12 +57,24 @@ class DecisionLogic:
         # --- Path 2: Pending Order Signals ---
         elif entry_type == "Pending":
             logger.info("Decision: Pending order signal identified. Applying weighted logic.")
-            signal_price_str = signal_data.get('entry_price')
-            sentiment_score = signal_data.get('sentiment_score', 0.0) # Default to neutral if missing
+            signal_price_raw = signal_data.entry_price # Use attribute access
+            sentiment_score = signal_data.sentiment_score if signal_data.sentiment_score is not None else 0.0 # Use attribute access, default
 
             # Validate signal price
             try:
-                signal_price = float(signal_price_str)
+                # Handle potential range string if not handled by analyzer (should be handled there now)
+                if isinstance(signal_price_raw, str) and '-' in signal_price_raw:
+                     # This path should ideally not be reached if analyzer processes ranges
+                     logger.warning(f"Decision logic received entry price range '{signal_price_raw}'. Using midpoint for check.")
+                     low_str, high_str = signal_price_raw.split('-', 1)
+                     signal_price = (float(low_str.strip()) + float(high_str.strip())) / 2.0
+                elif isinstance(signal_price_raw, str): # Handle "N/A" or other non-numeric strings
+                     raise ValueError(f"Invalid non-numeric price string: {signal_price_raw}")
+                else: # Should be float or None
+                     signal_price = float(signal_price_raw) # Convert potential None to error if needed
+
+            except (ValueError, TypeError):
+                 logger.error(f"Invalid or missing entry price for pending order: {signal_price_raw}")
             except (ValueError, TypeError):
                 logger.error(f"Invalid or missing entry price for pending order: {signal_price_str}")
                 return False, "Invalid entry price", None
@@ -78,10 +87,10 @@ class DecisionLogic:
 
             # B. LLM Sentiment Score (Conditional)
             # --- Read config values dynamically ---
-            use_sentiment = self.config.getboolean('DecisionLogic', 'use_sentiment_analysis', fallback=True)
-            sentiment_weight = self.config.getfloat('DecisionLogic', 'sentiment_weight', fallback=0.5)
-            price_action_weight = self.config.getfloat('DecisionLogic', 'price_action_weight', fallback=0.5)
-            approval_threshold = self.config.getfloat('DecisionLogic', 'approval_threshold', fallback=0.6)
+            use_sentiment = self.config_service.getboolean('DecisionLogic', 'use_sentiment_analysis', fallback=True) # Use service
+            sentiment_weight = self.config_service.getfloat('DecisionLogic', 'sentiment_weight', fallback=0.5) # Use service
+            price_action_weight = self.config_service.getfloat('DecisionLogic', 'price_action_weight', fallback=0.5) # Use service
+            approval_threshold = self.config_service.getfloat('DecisionLogic', 'approval_threshold', fallback=0.6) # Use service
 
             # Adjust weights if sentiment is disabled
             if not use_sentiment:
@@ -139,7 +148,7 @@ class DecisionLogic:
                    - int or None: The determined MT5 order type constant, or None.
         """
         # Read symbol dynamically
-        mt5_symbol = self.config.get('MT5', 'symbol', fallback='XAUUSD')
+        mt5_symbol = self.config_service.get('MT5', 'symbol', fallback='XAUUSD') # Use service
         logger.debug(f"Performing price action check for {action} @ {signal_price} on symbol {mt5_symbol}")
         tick = self.fetcher.get_symbol_tick(mt5_symbol)
         if not tick:
@@ -196,10 +205,11 @@ class DecisionLogic:
 
 # Example usage (optional, for testing)
 if __name__ == '__main__':
-    import configparser
+    # import configparser # No longer needed
     import os
     import sys
     from logger_setup import setup_logging
+    from config_service import ConfigService # Import service for testing
     from mt5_connector import MT5Connector # Need connector for fetcher
     from mt5_data_fetcher import MT5DataFetcher # Need fetcher
 
@@ -207,24 +217,24 @@ if __name__ == '__main__':
     test_log_path = os.path.join(os.path.dirname(__file__), '..', 'logs', 'decision_test.log')
     setup_logging(log_file_path=test_log_path, log_level_str='DEBUG')
 
-    # Load dummy config
-    example_config_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'config.example.ini')
-    if not os.path.exists(example_config_path):
-        print(f"ERROR: config.example.ini not found at {example_config_path}. Cannot run test.")
+    # --- IMPORTANT: Ensure config/config.ini exists and has REAL MT5 details for this test ---
+    try:
+        # Instantiate ConfigService directly for the test
+        test_config_service = ConfigService(config_file='../config/config.ini') # Adjust path if needed
+    except Exception as e:
+        print(f"ERROR: Failed to load config/config.ini for testing: {e}")
         sys.exit(1)
 
-    config = configparser.ConfigParser()
-    config.read(example_config_path)
-    # --- IMPORTANT: Fill in REAL MT5 details in config.example.ini for this test to work ---
-
-    if 'YOUR_' in config.get('MT5', 'account', fallback=''):
-         print("WARNING: Dummy MT5 credentials found in config. Decision test needs market data and may fail.")
-         # sys.exit(1) # Optionally exit
+    # Check if dummy values might still be present (optional check)
+    if 'YOUR_' in test_config_service.get('MT5', 'account', fallback=''):
+         print("WARNING: Dummy MT5 credentials might be present in config.ini. Decision test needs market data and may fail.")
 
     # --- Test Setup ---
-    connector = MT5Connector(config)
+    # Instantiate connector and fetcher with the test service instance
+    connector = MT5Connector(test_config_service)
     fetcher = MT5DataFetcher(connector)
-    decision_maker = DecisionLogic(config, fetcher)
+    # Instantiate decision maker with the test service
+    decision_maker = DecisionLogic(test_config_service, fetcher)
 
     print("Connecting MT5 for DecisionLogic test...")
     if not connector.connect():

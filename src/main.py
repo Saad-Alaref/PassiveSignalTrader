@@ -12,7 +12,8 @@ import json # For debug logging analysis results
 # Import local modules
 from .state_manager import StateManager # Use relative import
 from .logger_setup import setup_logging # Use relative import
-from .config_loader import load_config # Use relative import
+# from .config_loader import load_config # No longer needed directly
+from .config_service import config_service, ConfigService # Import the service instance and class
 from .mt5_connector import MT5Connector # Use relative import
 from .mt5_data_fetcher import MT5DataFetcher # Use relative import
 from .llm_interface import LLMInterface # Use relative import
@@ -28,10 +29,10 @@ from . import event_processor # Use relative import
 
 # --- Global Variables ---
 logger = None # Will be configured in main
-shared_config = None # Global reference to the currently active config
-config_file_path = 'config/config.ini' # Define path globally for reloader
+# shared_config = None # Replaced by config_service instance
+config_file_path = 'config/config.ini' # Keep for potential direct path use if needed
 last_config_mtime = 0 # Track modification time
-config_lock = asyncio.Lock() # Lock for updating shared_config
+# config_lock = asyncio.Lock() # Lock might not be needed if service handles internal state safely
 config_reloader_task = None # Task handle for the reloader
 periodic_monitor_task = None # Task handle for the periodic MT5 monitor
 
@@ -81,8 +82,8 @@ def handle_shutdown_signal(sig, frame):
 # --- Main Telegram Event Handler ---
 async def handle_telegram_event(event):
     # Make all necessary components accessible
-    # Use shared_config instead of config in global scope for dynamic access
-    global logger, shared_config, state_manager, trade_manager, signal_analyzer, \
+    # Use config_service instead of shared_config
+    global logger, config_service, state_manager, trade_manager, signal_analyzer, \
            duplicate_checker, decision_logic, trade_calculator, mt5_executor, \
            telegram_sender, mt5_fetcher
 
@@ -204,7 +205,7 @@ async def handle_telegram_event(event):
                 mt5_executor=mt5_executor,
                 telegram_sender=telegram_sender,
                 duplicate_checker=duplicate_checker,
-                config=shared_config, # Pass shared_config
+                config_service=config_service, # Pass service instance
                 log_prefix=log_prefix,
                 mt5_fetcher=mt5_fetcher # Pass fetcher
             )
@@ -220,7 +221,7 @@ async def handle_telegram_event(event):
                  mt5_executor=mt5_executor,
                  telegram_sender=telegram_sender,
                  duplicate_checker=duplicate_checker, # Needed for marking processed inside process_update
-                 config=shared_config, # Pass shared_config
+                 config_service=config_service, # Pass service instance
                  log_prefix=log_prefix,
                  llm_context=llm_context, # Pass context for potential re-analysis
                  image_data=image_data # Pass image data
@@ -238,8 +239,8 @@ async def handle_telegram_event(event):
 
 # --- Config Reloader Task ---
 async def config_reloader_task_func(interval_seconds=30):
-    """Periodically checks config file for changes and reloads if necessary."""
-    global shared_config, config_file_path, last_config_mtime, logger, config_lock
+    """Periodically checks config file for changes and triggers reload via ConfigService."""
+    global config_service, config_file_path, last_config_mtime, logger # Remove shared_config, config_lock
 
     # Construct absolute path relative to this script's location
     # Assuming main.py is in src/, config is in ../config/
@@ -259,21 +260,15 @@ async def config_reloader_task_func(interval_seconds=30):
             current_mtime = os.path.getmtime(abs_config_path)
 
             if current_mtime > last_config_mtime:
-                logger.info(f"Detected change in config file '{abs_config_path}'. Attempting reload...")
-                # Use the same loading logic, but update the shared config
-                # Pass the relative path back to load_config as it expects
-                new_config = load_config(config_path=config_file_path)
-
-                if new_config:
-                    async with config_lock:
-                        shared_config = new_config # Update the global reference
-                        last_config_mtime = current_mtime
-                    logger.info(f"Successfully reloaded and validated config from '{config_file_path}'.")
-                    # Optional: Log which settings might require a restart if changed
-                    # check_restart_required_settings(old_config, new_config) # Need old_config ref
-                else:
-                    logger.error(f"Failed to reload config file '{config_file_path}' (validation failed or read error). Keeping previous configuration.")
-                    # Keep using the old config, don't update mtime
+                logger.info(f"Detected change in config file '{abs_config_path}'. Triggering reload via ConfigService...")
+                try:
+                    # Tell the service to reload its internal config
+                    config_service.reload_config()
+                    last_config_mtime = current_mtime # Update mtime only on successful reload by service
+                    logger.info(f"ConfigService successfully reloaded configuration from '{config_file_path}'.")
+                except Exception as reload_err:
+                    logger.error(f"ConfigService failed to reload config from '{config_file_path}': {reload_err}. Keeping previous configuration.")
+                    # Do not update last_config_mtime if reload failed
             else:
                  logger.debug("No config file changes detected.")
 
@@ -289,13 +284,13 @@ async def config_reloader_task_func(interval_seconds=30):
 # --- Periodic Task for Trade Management (AutoSL, AutoBE, TP Checks) ---
 async def periodic_mt5_monitor_task(interval_seconds=60):
     """Periodically fetches positions and calls trade management functions."""
-    global trade_manager, state_manager, logger, mt5_connector, shared_config
+    global trade_manager, state_manager, logger, mt5_connector, config_service # Use config_service
 
     logger.info(f"Starting periodic MT5 monitor task (initial interval: {interval_seconds}s).")
     while True:
         try:
             # Read interval dynamically inside the loop for hot-reloading
-            current_interval = shared_config.getint('Misc', 'periodic_check_interval_seconds', fallback=60)
+            current_interval = config_service.getint('Misc', 'periodic_check_interval_seconds', fallback=60)
             if current_interval <= 0:
                  logger.warning("Periodic check interval is zero or negative, task will sleep for 60s.")
                  current_interval = 60 # Prevent busy-looping
@@ -377,32 +372,31 @@ async def periodic_mt5_monitor_task(interval_seconds=60):
 async def run_bot():
     """Initializes and runs the main application components."""
     # Ensure all globals including task handles are declared
-    global logger, shared_config, mt5_connector, mt5_fetcher, llm_interface, \
+    global logger, config_service, mt5_connector, mt5_fetcher, llm_interface, \
            signal_analyzer, duplicate_checker, decision_logic, trade_calculator, \
            mt5_executor, telegram_reader, telegram_sender, state_manager, trade_manager, \
-           config_file_path, last_config_mtime, config_reloader_task, periodic_monitor_task
+           config_file_path, last_config_mtime, config_reloader_task, periodic_monitor_task # Replace shared_config
 
     # 1. Load Initial Config into shared_config
-    initial_config = load_config(config_path=config_file_path)
-    if not initial_config:
-        print("Exiting due to initial configuration error.", file=sys.stderr)
+    # 1. Initialize Config Service (this loads the config)
+    # config_service is already initialized at module level when imported
+    if config_service is None:
+        print("CRITICAL: ConfigService failed to initialize during import. Check logs. Exiting.", file=sys.stderr)
         sys.exit(1)
-    async with config_lock:
-        shared_config = initial_config # Set the initial shared config
-        # Construct absolute path relative to this script's location for mtime check
-        script_dir = os.path.dirname(__file__)
-        abs_config_path = os.path.abspath(os.path.join(script_dir, '..', config_file_path))
-        if os.path.exists(abs_config_path):
-             last_config_mtime = os.path.getmtime(abs_config_path)
-        else:
-             # Should not happen if load_config succeeded, but handle defensively
-             last_config_mtime = 0
-             print(f"Warning: Could not get initial modification time for {abs_config_path}", file=sys.stderr)
+
+    # Set initial modification time for reloader task
+    script_dir = os.path.dirname(__file__)
+    abs_config_path = os.path.abspath(os.path.join(script_dir, '..', config_file_path))
+    if os.path.exists(abs_config_path):
+         last_config_mtime = os.path.getmtime(abs_config_path)
+    else:
+         last_config_mtime = 0
+         print(f"Warning: Could not get initial modification time for {abs_config_path}", file=sys.stderr)
 
     # 2. Setup Logging
-    # Use shared_config for initial setup too
-    log_file = shared_config.get('Logging', 'log_file', fallback='logs/bot.log')
-    log_level = shared_config.get('Logging', 'log_level', fallback='INFO')
+    # Use config_service for initial setup
+    log_file = config_service.get('Logging', 'log_file', fallback='logs/bot.log')
+    log_level = config_service.get('Logging', 'log_level', fallback='INFO')
     # Construct absolute path for log file if it's relative
     if not os.path.isabs(log_file):
         log_file = os.path.join(os.path.dirname(__file__), '..', log_file)
@@ -412,28 +406,28 @@ async def run_bot():
 
     # 3. Initialize Components
     try:
-        # Pass the shared_config object reference to components
-        # Components needing dynamic updates must access shared_config directly later
-        mt5_connector = MT5Connector(shared_config) # Uses config on init (restart required for changes)
+        # Pass the config_service instance to components
+        # Components can now get config values dynamically via the service
+        mt5_connector = MT5Connector(config_service) # Pass service
         mt5_fetcher = MT5DataFetcher(mt5_connector) # Initialize fetcher early
-        llm_interface = LLMInterface(shared_config) # Reads prompts dynamically now
-        signal_analyzer = SignalAnalyzer(llm_interface, mt5_fetcher, shared_config) # Pass config ref
+        llm_interface = LLMInterface(config_service) # Pass service
+        signal_analyzer = SignalAnalyzer(llm_interface, mt5_fetcher, config_service) # Pass service
         # Duplicate checker size likely doesn't need hot-reload
-        duplicate_cache_size = shared_config.getint('Misc', 'duplicate_cache_size', fallback=10000)
-        duplicate_checker = DuplicateChecker(max_size=duplicate_cache_size)
-        decision_logic = DecisionLogic(shared_config, mt5_fetcher) # Pass config ref
-        trade_calculator = TradeCalculator(shared_config, mt5_fetcher) # Pass config ref
-        mt5_executor = MT5Executor(shared_config, mt5_connector) # Pass config ref
-        state_manager = StateManager(shared_config) # Pass config ref (needed for sender now)
+        duplicate_cache_size = config_service.getint('Misc', 'duplicate_cache_size', fallback=10000)
+        duplicate_checker = DuplicateChecker(max_size=duplicate_cache_size) # Size likely doesn't need hot-reload
+        decision_logic = DecisionLogic(config_service, mt5_fetcher) # Pass service
+        trade_calculator = TradeCalculator(config_service, mt5_fetcher) # Pass service
+        mt5_executor = MT5Executor(config_service, mt5_connector) # Pass service
+        state_manager = StateManager(config_service) # Pass service
 
         # Initialize TelegramSender *after* components it depends on
-        telegram_sender = TelegramSender(shared_config, state_manager, mt5_executor, mt5_connector, mt5_fetcher) # Pass components including mt5_fetcher
+        telegram_sender = TelegramSender(config_service, state_manager, mt5_executor, mt5_connector, mt5_fetcher) # Pass service
 
         # Initialize TelegramReader (remove callback handler argument)
-        telegram_reader = TelegramReader(shared_config, handle_telegram_event) # Remove handle_callback_query
+        telegram_reader = TelegramReader(config_service, handle_telegram_event) # Pass service
 
         # Initialize TradeManager after its dependencies
-        trade_manager = TradeManager(shared_config, state_manager, mt5_executor, trade_calculator, telegram_sender, mt5_fetcher) # Pass config ref
+        trade_manager = TradeManager(config_service, state_manager, mt5_executor, trade_calculator, telegram_sender, mt5_fetcher) # Pass service
     except Exception as e:
         logger.critical(f"Failed to initialize components: {e}", exc_info=True)
         sys.exit(1)
@@ -466,7 +460,7 @@ async def run_bot():
 
     # 5. Run main loop until shutdown signal
     # Start the periodic tasks using initial config values
-    monitor_interval = shared_config.getint('Misc', 'periodic_check_interval_seconds', fallback=60)
+    monitor_interval = config_service.getint('Misc', 'periodic_check_interval_seconds', fallback=60)
     periodic_monitor_task = asyncio.create_task(periodic_mt5_monitor_task(monitor_interval), name="MT5MonitorTask")
     config_reload_interval = 30 # Check every 30 seconds (could be made configurable)
     config_reloader_task = asyncio.create_task(config_reloader_task_func(config_reload_interval), name="ConfigReloaderTask")

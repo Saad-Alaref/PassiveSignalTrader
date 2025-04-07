@@ -3,7 +3,7 @@ import MetaTrader5 as mt5
 from collections import deque, defaultdict # Keep deque, defaultdict might be useful later
 from datetime import datetime, timezone, timedelta # Keep only this one
 from telethon import events
-
+from .models import TradeInfo # Import the dataclass
 logger = logging.getLogger('TradeBot')
 
 class StateManager:
@@ -11,14 +11,14 @@ class StateManager:
     Manages the application's state, including active trades and message history.
     """
 
-    def __init__(self, config):
+    def __init__(self, config_service_instance): # Inject service
         """
         Initializes the StateManager.
 
         Args:
             config (configparser.ConfigParser): The application configuration.
         """
-        self.config = config
+        self.config_service = config_service_instance # Store service instance
         # List to store details of trades initiated by the bot.
         # Each entry example:
         # {
@@ -34,7 +34,7 @@ class StateManager:
         # }
         self.bot_active_trades = []
         # Deque for message history - Max size read at init, not easily hot-reloadable
-        self.history_message_count = config.getint('LLMContext', 'history_message_count', fallback=5)
+        self.history_message_count = self.config_service.getint('LLMContext', 'history_message_count', fallback=10) # Use service
         self.message_history = deque(maxlen=self.history_message_count)
         self.last_market_execution_time = None # Timestamp of the last market order execution
         self.last_market_execution_time = None # Timestamp of the last market order execution
@@ -48,26 +48,52 @@ class StateManager:
 
     # --- Active Trade Management ---
 
-    def add_active_trade(self, trade_info, auto_tp_applied=False):
+    def add_active_trade(self, trade_info_data: dict, auto_tp_applied=False): # Accept dict initially
         """
-        Adds a new trade to the active trades list.
+        Adds a new trade to the active trades list, converting dict to TradeInfo object.
 
         Args:
-            trade_info (dict): Dictionary containing trade details.
+            trade_info_data (dict): Dictionary containing trade details from execution strategies.
             auto_tp_applied (bool): Flag indicating if AutoTP was used for this trade.
         """
-        if not isinstance(trade_info, dict) or 'ticket' not in trade_info:
-            logger.error(f"Attempted to add invalid trade_info: {trade_info}")
+        if not isinstance(trade_info_data, dict) or 'ticket' not in trade_info_data:
+            logger.error(f"Attempted to add invalid trade_info_data: {trade_info_data}")
             return
-        # Add the AutoTP flag to the dictionary before storing
-        trade_info['auto_tp_applied'] = auto_tp_applied
-        trade_info['tsl_active'] = False # Initialize TSL flag
-        # Ensure it's not already added
-        if not any(t['ticket'] == trade_info['ticket'] for t in self.bot_active_trades):
-            self.bot_active_trades.append(trade_info)
-            logger.info(f"Added active trade info: {trade_info}")
+
+        # Convert dict to TradeInfo dataclass instance
+        try:
+            # Ensure all required fields for TradeInfo are present or have defaults
+            trade_obj = TradeInfo(
+                ticket=trade_info_data['ticket'],
+                symbol=trade_info_data['symbol'],
+                open_time=trade_info_data['open_time'],
+                original_msg_id=trade_info_data['original_msg_id'],
+                entry_price=trade_info_data.get('entry_price'), # Use .get for optional fields
+                initial_sl=trade_info_data.get('initial_sl'),
+                original_volume=trade_info_data['original_volume'],
+                all_tps=trade_info_data.get('all_tps', []), # Default to empty list
+                tp_strategy=trade_info_data['tp_strategy'],
+                assigned_tp=trade_info_data.get('assigned_tp'),
+                is_pending=trade_info_data.get('is_pending', False),
+                tsl_active=False, # Initialize TSL flag
+                auto_tp_applied=auto_tp_applied, # Add the flag
+                next_tp_index=trade_info_data.get('next_tp_index', 0),
+                sequence_info=trade_info_data.get('sequence_info'),
+                auto_sl_pending_timestamp=None # Initialize as None
+            )
+        except KeyError as e:
+            logger.error(f"Missing required key '{e}' in trade_info_data when creating TradeInfo object: {trade_info_data}")
+            return
+        except Exception as e:
+            logger.error(f"Error creating TradeInfo object from data: {e}. Data: {trade_info_data}", exc_info=True)
+            return
+        # Ensure it's not already added (check ticket attribute of objects)
+        if not any(t.ticket == trade_obj.ticket for t in self.bot_active_trades):
+            self.bot_active_trades.append(trade_obj) # Append the object
+            logger.info(f"Added active trade info (Ticket: {trade_obj.ticket})")
+            logger.debug(f"Stored TradeInfo object: {trade_obj}")
         else:
-            logger.warning(f"Attempted to add duplicate active trade ticket: {trade_info['ticket']}")
+            logger.warning(f"Attempted to add duplicate active trade ticket: {trade_obj.ticket}")
 
     def remove_inactive_trades(self):
         """
@@ -101,7 +127,7 @@ class StateManager:
 
         original_count = len(self.bot_active_trades)
         # Filter the internal list in place
-        self.bot_active_trades[:] = [t for t in self.bot_active_trades if t['ticket'] in active_tickets_on_mt5]
+        self.bot_active_trades[:] = [t for t in self.bot_active_trades if t.ticket in active_tickets_on_mt5] # Use attribute access
         filtered_count = len(self.bot_active_trades)
         removed_count = original_count - filtered_count
 
@@ -117,11 +143,11 @@ class StateManager:
 
     def get_trade_by_ticket(self, ticket):
         """Finds and returns a trade by its MT5 ticket."""
-        return next((t for t in self.bot_active_trades if t['ticket'] == ticket), None)
+        return next((t for t in self.bot_active_trades if t.ticket == ticket), None) # Use attribute access
 
     def get_trade_by_original_msg_id(self, msg_id):
         """Finds and returns a trade by the original Telegram message ID that triggered it."""
-        return next((t for t in self.bot_active_trades if t.get('original_msg_id') == msg_id), None)
+        return next((t for t in self.bot_active_trades if t.original_msg_id == msg_id), None) # Use attribute access
 
     # --- AutoSL Flag Management ---
 
@@ -129,8 +155,8 @@ class StateManager:
         """Marks a trade as pending AutoSL application by adding a timestamp."""
         trade = self.get_trade_by_ticket(ticket)
         if trade:
-            if 'auto_sl_pending_timestamp' not in trade:
-                trade['auto_sl_pending_timestamp'] = datetime.now(timezone.utc)
+            if trade.auto_sl_pending_timestamp is None: # Check attribute
+                trade.auto_sl_pending_timestamp = datetime.now(timezone.utc) # Set attribute
                 logger.info(f"Trade {ticket} marked for AutoSL check.")
                 return True
             else:
@@ -143,15 +169,15 @@ class StateManager:
     def remove_auto_sl_pending_flag(self, ticket):
         """Removes the AutoSL pending flag from a trade."""
         trade = self.get_trade_by_ticket(ticket)
-        if trade and 'auto_sl_pending_timestamp' in trade:
-            del trade['auto_sl_pending_timestamp']
+        if trade and trade.auto_sl_pending_timestamp is not None: # Check attribute
+            trade.auto_sl_pending_timestamp = None # Set attribute to None
             logger.debug(f"Removed AutoSL pending flag for ticket {ticket}.")
             return True
         return False
 
     def get_trades_pending_auto_sl(self):
         """Returns a list of trades currently marked for AutoSL check."""
-        return [t for t in self.bot_active_trades if 'auto_sl_pending_timestamp' in t]
+        return [t for t in self.bot_active_trades if t.auto_sl_pending_timestamp is not None] # Check attribute
 
     # --- Message History Management ---
 
@@ -246,14 +272,14 @@ class StateManager:
         """
         llm_context = {}
         # Get config settings for context
-        # Read context flags dynamically
-        enable_price = self.config.getboolean('LLMContext', 'enable_price_context', fallback=True)
-        enable_trades = self.config.getboolean('LLMContext', 'enable_trade_context', fallback=True)
+        # Read context flags dynamically using the service
+        enable_price = self.config_service.getboolean('LLMContext', 'enable_price_context', fallback=True)
+        enable_trades = self.config_service.getboolean('LLMContext', 'enable_trade_context', fallback=True)
         enable_history = self.config.getboolean('LLMContext', 'enable_history_context', fallback=True)
 
         # 1. Price Context
         if enable_price:
-            symbol = self.config.get('MT5', 'symbol', fallback='XAUUSD')
+            symbol = self.config_service.get('MT5', 'symbol', fallback='XAUUSD') # Use service
             tick = mt5_fetcher.get_symbol_tick(symbol)
             if tick:
                 # Convert timestamp for context
@@ -274,8 +300,9 @@ class StateManager:
                     entry_price_display = t.get('entry_price', 'N/A')
                     if entry_price_display is None: entry_price_display = "Market"
                     # Include more details like type? Fetch from MT5? Keep it simple for now.
+                    # Access attributes of the TradeInfo object
                     formatted_trades.append(
-                        f"{i+1}. Ticket: {t['ticket']}, Symbol: {t['symbol']}, Entry: {entry_price_display}"
+                        f"{i+1}. Ticket: {t.ticket}, Symbol: {t.symbol}, Entry: {entry_price_display}"
                     )
                 llm_context['active_trades'] = formatted_trades
                 logger.debug(f"Adding active trades context: {formatted_trades}")
@@ -283,6 +310,7 @@ class StateManager:
                  logger.debug("No active bot trades found for LLM context.")
 
         # 3. Message History Context
+        enable_history = self.config_service.getboolean('LLMContext', 'enable_history_context', fallback=True) # Use service
         if enable_history:
             history = self.get_message_history()
             if history:
@@ -330,17 +358,34 @@ class StateManager:
 # Example usage (optional, for testing within this file)
 # Add tests for pending confirmations if running standalone
 if __name__ == '__main__':
-    import configparser
+    # import configparser # No longer needed directly
     from logger_setup import setup_logging
     import time
+    from config_service import ConfigService # Import service for testing
 
     # Setup basic logging for test
     setup_logging(log_level_str='DEBUG')
 
-    # Dummy config
-    config = configparser.ConfigParser()
-    config['LLMContext'] = {'history_message_count': '3'}
-    config['MT5'] = {'symbol': 'TESTUSD'}
+    # Dummy config service for testing
+    # Create a dummy config file content
+    dummy_config_content = """
+[LLMContext]
+history_message_count = 3
+enable_price_context = true
+enable_trade_context = true
+enable_history_context = true
+
+[MT5]
+symbol = TESTUSD
+"""
+    # Write to a temporary file (or use StringIO if preferred)
+    dummy_config_path = "dummy_config_for_state_test.ini"
+    with open(dummy_config_path, "w") as f:
+        f.write(dummy_config_content)
+
+    # Instantiate ConfigService with the dummy file
+    test_config_service = ConfigService(config_file=dummy_config_path)
+
 
     # Dummy event class
     class DummyEvent:
@@ -355,7 +400,8 @@ if __name__ == '__main__':
     class DummyFetcher:
         def get_symbol_tick(self, symbol): return None # Simulate no price data
 
-    state = StateManager(config)
+    # Instantiate StateManager with the test service
+    state = StateManager(test_config_service)
     fetcher = DummyFetcher()
 
     # Test history
@@ -420,3 +466,7 @@ if __name__ == '__main__':
     assert removed_bad is False
 
     print("\nStateManager tests finished.")
+    # Clean up dummy config file
+    import os
+    if os.path.exists(dummy_config_path):
+        os.remove(dummy_config_path)

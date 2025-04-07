@@ -15,16 +15,17 @@ RETRY_DELAY = 5 # seconds
 class LLMInterface:
     """Handles communication with the Google Gemini API."""
 
-    def __init__(self, config):
+    def __init__(self, config_service_instance): # Inject service
         """
         Initializes the LLM interface and configures the Gemini client.
 
         Args:
-            config (configparser.ConfigParser): The application configuration object.
+            config_service_instance (ConfigService): The application config service.
         """
-        self.api_key = config.get('Gemini', 'api_key', fallback=None)
-        self.model_name = config.get('Gemini', 'model_name', fallback='gemini-pro')
-        self.config = config # Store config for accessing prompts later
+        self.config_service = config_service_instance # Store service instance
+        self.api_key = self.config_service.get('Gemini', 'api_key', fallback=None) # Use service
+        self.model_name = self.config_service.get('Gemini', 'model_name', fallback='gemini-pro') # Use service
+        # self.config = config # No longer need to store the old config object
 
         if not self.api_key:
             logger.critical("Gemini API key not found in configuration. LLM features will be disabled.")
@@ -91,9 +92,9 @@ class LLMInterface:
             context_str = "" # No context to add
 
         # --- Get Prompts from Config ---
-        base_instructions_template = self.config.get('LLMPrompts', 'base_instructions', fallback="ERROR: base_instructions not found in config")
-        analyze_signal_instructions = self.config.get('LLMPrompts', 'analyze_signal_instructions', fallback="ERROR: analyze_signal_instructions not found in config")
-        analyze_edit_or_reply_instructions = self.config.get('LLMPrompts', 'analyze_edit_or_reply_instructions', fallback="ERROR: analyze_edit_or_reply_instructions not found in config")
+        base_instructions_template = self.config_service.get('LLMPrompts', 'base_instructions', fallback="ERROR: base_instructions not found in config") # Use service
+        analyze_signal_instructions = self.config_service.get('LLMPrompts', 'analyze_signal_instructions', fallback="ERROR: analyze_signal_instructions not found in config") # Use service
+        analyze_edit_or_reply_instructions = self.config_service.get('LLMPrompts', 'analyze_edit_or_reply_instructions', fallback="ERROR: analyze_edit_or_reply_instructions not found in config") # Use service
 
         # --- Format Base Prompt ---
         # Use .format() for safe insertion of potentially complex context/message strings
@@ -200,32 +201,32 @@ class LLMInterface:
 
 # Example usage (optional, for testing)
 if __name__ == '__main__':
-    import configparser
+    # import configparser # No longer needed
     import os
     import sys
-    import json # Need json for parsing in the main function now
+    import json
     from logger_setup import setup_logging
+    from config_service import ConfigService # Import service for testing
 
     # Setup basic logging for test
     test_log_path = os.path.join(os.path.dirname(__file__), '..', 'logs', 'llm_interface_test.log')
     setup_logging(log_file_path=test_log_path, log_level_str='DEBUG')
 
-    # Load dummy config
-    example_config_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'config.example.ini')
-    if not os.path.exists(example_config_path):
-        print(f"ERROR: config.example.ini not found at {example_config_path}. Cannot run test.")
+    # --- IMPORTANT: Ensure config/config.ini exists and has REAL Gemini API Key ---
+    try:
+        # Instantiate ConfigService directly for the test
+        test_config_service = ConfigService(config_file='../config/config.ini') # Adjust path if needed
+    except Exception as e:
+        print(f"ERROR: Failed to load config/config.ini for testing: {e}")
         sys.exit(1)
 
-    config = configparser.ConfigParser()
-    config.read(example_config_path)
-    # --- IMPORTANT: Fill in REAL Gemini API Key in config.example.ini for this test to work ---
+    # Check if dummy values might still be present (optional check)
+    if 'YOUR_' in test_config_service.get('Gemini', 'api_key', fallback=''):
+         print("WARNING: Dummy Gemini API key might be present in config.ini. LLM test may fail.")
+         print("Please ensure config/config.ini has a real API key.")
 
-    if 'YOUR_' in config.get('Gemini', 'api_key', fallback=''):
-         print("WARNING: Dummy Gemini API key found in config. LLM test will fail.")
-         print("Please edit config/config.example.ini with a real API key.")
-         # sys.exit(1) # Optionally exit
-
-    llm_interface = LLMInterface(config)
+    # Instantiate LLMInterface with the test service instance
+    llm_interface = LLMInterface(test_config_service)
 
     if llm_interface.model:
         print("Testing with a sample signal message...")

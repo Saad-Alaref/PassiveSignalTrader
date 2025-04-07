@@ -215,7 +215,7 @@ class TelegramSender:
         else:
             logger.info("Telegram Sender client already disconnected or not initialized.")
 
-    async def send_message(self, message_text, parse_mode='html', target_chat_id=None):
+    async def send_message(self, message_text, parse_mode='html', target_chat_id=None, reply_to=None):
         """Sends a text message to the target channel using the bot account."""
         if not self.client or not self.client.is_connected():
             logger.error("Cannot send message, Telegram Sender client not connected.")
@@ -234,7 +234,8 @@ class TelegramSender:
             await self.client.send_message(
                 actual_target_id,
                 message_text,
-                parse_mode=parse_mode
+                parse_mode=parse_mode,
+                reply_to=reply_to
             )
             logger.debug("Sender message sent successfully.")
             return True

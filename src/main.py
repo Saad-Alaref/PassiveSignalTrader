@@ -159,7 +159,15 @@ async def handle_telegram_event(event):
                 logger.info(f"{log_prefix} Signal analysis result type: {analysis_type}")
                 # Send analysis debug message
                 # import json # Moved to top
-                analysis_data_str = json.dumps(analysis_result.get('data'), indent=2) if analysis_result.get('data') else "None"
+                data_obj = analysis_result.get('data')
+                if data_obj:
+                    import dataclasses
+                    if dataclasses.is_dataclass(data_obj):
+                        analysis_data_str = json.dumps(dataclasses.asdict(data_obj), indent=2)
+                    else:
+                        analysis_data_str = json.dumps(data_obj, indent=2)
+                else:
+                    analysis_data_str = "None"
                 if debug_channel_id:
                     debug_msg_analysis = f"🧠 {log_prefix} LLM Analysis Result:\n<b>Type:</b> <code>{analysis_type}</code>\n<b>Data:</b>\n<pre>{analysis_data_str}</pre>"
                     await telegram_sender.send_message(debug_msg_analysis, target_chat_id=debug_channel_id, parse_mode='html')
@@ -207,7 +215,7 @@ async def handle_telegram_event(event):
                 mt5_executor=mt5_executor,
                 telegram_sender=telegram_sender,
                 duplicate_checker=duplicate_checker,
-                config_service=config_service, # Pass service instance
+                config_service_instance=config_service, # Pass service instance
                 log_prefix=log_prefix,
                 mt5_fetcher=mt5_fetcher # Pass fetcher
             )
@@ -223,7 +231,7 @@ async def handle_telegram_event(event):
                  mt5_executor=mt5_executor,
                  telegram_sender=telegram_sender,
                  duplicate_checker=duplicate_checker, # Needed for marking processed inside process_update
-                 config_service=config_service, # Pass service instance
+                 config_service_instance=config_service, # Pass service instance
                  log_prefix=log_prefix,
                  llm_context=llm_context, # Pass context for potential re-analysis
                  image_data=image_data # Pass image data
@@ -325,7 +333,7 @@ async def periodic_mt5_monitor_task(interval_seconds=60):
             # Get a copy to avoid issues if the list is modified during iteration
             active_bot_trades = list(state_manager.get_active_trades())
             for trade_info in active_bot_trades:
-                ticket = trade_info.get('ticket')
+                ticket = trade_info.ticket
                 if not ticket: continue
 
                 # Get the latest position data from MT5 for this ticket
@@ -467,7 +475,7 @@ async def run_bot():
     config_reload_interval = 30 # Check every 30 seconds (could be made configurable)
     config_reloader_task = asyncio.create_task(config_reloader_task_func(config_reload_interval), name="ConfigReloaderTask")
     trade_closure_monitor_task = asyncio.create_task(
-        periodic_trade_closure_monitor_task(state_manager, telegram_sender, interval_seconds=60),
+        periodic_trade_closure_monitor_task(state_manager, telegram_sender, interval_seconds=monitor_interval),
         name="TradeClosureMonitorTask"
     )
 

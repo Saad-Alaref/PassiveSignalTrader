@@ -1,0 +1,118 @@
+history_orders_get
+Get orders from trading history with the ability to filter by ticket or position. There are three call options.
+
+Call specifying a time interval. Return all orders falling within the specified interval.
+
+history_orders_get(
+   date_from,                // date the orders are requested from
+   date_to,                  // date, up to which the orders are requested
+   group="GROUP"        // filter for selecting orders by symbols
+   )
+
+Call specifying the order ticket. Return an order with the specified ticket.
+
+history_orders_get(
+   ticket=TICKET        // order ticket
+)
+
+Call specifying the position ticket. Return all orders with a position ticket specified in the ORDER_POSITION_ID property.
+
+history_orders_get(
+   position=POSITION    // position ticket
+)
+
+Parameters
+
+date_from
+
+[in]  Date the orders are requested from. Set by the 'datetime' object or as a number of seconds elapsed since 1970.01.01. Required unnamed parameter is specified first.
+
+date_to
+
+[in]  Date, up to which the orders are requested. Set by the 'datetime' object or as a number of seconds elapsed since 1970.01.01. Required unnamed parameter is specified second.
+
+group="GROUP"
+
+[in]  The filter for arranging a group of necessary symbols. Optional named parameter. If the group is specified, the function returns only orders meeting a specified criteria for a symbol name.
+
+ticket=TICKET
+
+[in]  Order ticket that should be received. Optional parameter. If not specified, the filter is not applied.
+
+position=POSITION
+
+[in]  Ticket of a position (stored in ORDER_POSITION_ID) all orders should be received for. Optional parameter. If not specified, the filter is not applied.
+
+Return Value
+
+Return info in the form of a named tuple structure (namedtuple). Return None in case of an error. The info on the error can be obtained using last_error().
+
+Note
+
+The function allows receiving all history orders within a specified period in a single call similar to the HistoryOrdersTotal and HistoryOrderSelect tandem.
+
+The group parameter may contain several comma separated conditions. A condition can be set as a mask using '*'. The logical negation symbol '!' can be used for an exclusion. All conditions are applied sequentially, which means conditions of including to a group should be specified first followed by an exclusion condition. For example, group="*, !EUR" means that deals for all symbols should be selected first and the ones containing "EUR" in symbol names should be excluded afterwards.
+
+Example:
+
+from datetime import datetime
+import MetaTrader5 as mt5
+import pandas as pd
+pd.set_option('display.max_columns', 500) # number of columns to be displayed
+pd.set_option('display.width', 1500)      # max table width to display
+# display data on the MetaTrader 5 package
+print("MetaTrader5 package author: ",mt5.__author__)
+print("MetaTrader5 package version: ",mt5.__version__)
+print()
+# establish connection to the MetaTrader 5 terminal
+if not mt5.initialize():
+    print("initialize() failed, error code =",mt5.last_error())
+    quit()
+ 
+# get the number of orders in history
+from_date=datetime(2020,1,1)
+to_date=datetime.now()
+history_orders=mt5.history_orders_get(from_date, to_date, group="*GBP*")
+if history_orders==None:
+    print("No history orders with group=\"*GBP*\", error code={}".format(mt5.last_error()))
+elif len(history_orders)>0:
+    print("history_orders_get({}, {}, group=\"*GBP*\")={}".format(from_date,to_date,len(history_orders)))
+print()
+ 
+# display all historical orders by a position ticket
+position_id=530218319
+position_history_orders=mt5.history_orders_get(position=position_id)
+if position_history_orders==None:
+    print("No orders with position #{}".format(position_id))
+    print("error code =",mt5.last_error())
+elif len(position_history_orders)>0:
+    print("Total history orders on position #{}: {}".format(position_id,len(position_history_orders)))
+    # display all historical orders having a specified position ticket
+    for position_order in position_history_orders:        
+        print(position_order)
+    print()
+    # display these orders as a table using pandas.DataFrame
+    df=pd.DataFrame(list(position_history_orders),columns=position_history_orders[0]._asdict().keys())
+    df.drop(['time_expiration','type_time','state','position_by_id','reason','volume_current','price_stoplimit','sl','tp'], axis=1, inplace=True)
+    df['time_setup'] = pd.to_datetime(df['time_setup'], unit='s')
+    df['time_done'] = pd.to_datetime(df['time_done'], unit='s')
+    print(df)
+ 
+# shut down connection to the MetaTrader 5 terminal
+mt5.shutdown()
+ 
+Result:
+MetaTrader5 package author:  MetaQuotes Software Corp.
+MetaTrader5 package version:  5.0.29
+ 
+history_orders_get(2020-01-01 00:00:00, 2020-03-25 17:17:32.058795, group="*GBP*")=14
+ 
+Total history orders on position #530218319: 2
+TradeOrder(ticket=530218319, time_setup=1582282114, time_setup_msc=1582282114681, time_done=1582303777, time_done_msc=1582303777582, time_expiration=0, ...
+TradeOrder(ticket=535548147, time_setup=1583176242, time_setup_msc=1583176242265, time_done=1583176242, time_done_msc=1583176242265, time_expiration=0, ...
+ 
+      ticket          time_setup  time_setup_msc           time_done  time_done_msc  type  type_filling  magic  position_id  volume_initial  price_open  price_current  symbol comment external_id
+0  530218319 2020-02-21 10:48:34   1582282114681 2020-02-21 16:49:37  1582303777582     2             2      0    530218319            0.01     0.97898        0.97863  USDCHF                    
+1  535548147 2020-03-02 19:10:42   1583176242265 2020-03-02 19:10:42  1583176242265     1             0      0    530218319            0.01     0.95758        0.95758  USDCHF   
+
+See also

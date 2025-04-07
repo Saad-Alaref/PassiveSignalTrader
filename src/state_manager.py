@@ -276,7 +276,7 @@ class StateManager:
         # Read context flags dynamically using the service
         enable_price = self.config_service.getboolean('LLMContext', 'enable_price_context', fallback=True)
         enable_trades = self.config_service.getboolean('LLMContext', 'enable_trade_context', fallback=True)
-        enable_history = self.config.getboolean('LLMContext', 'enable_history_context', fallback=True)
+        enable_history = self.config_service.getboolean('LLMContext', 'enable_history_context', fallback=True)
 
         # 1. Price Context
         if enable_price:
@@ -298,7 +298,7 @@ class StateManager:
             if active_trades:
                 formatted_trades = []
                 for i, t in enumerate(active_trades):
-                    entry_price_display = t.get('entry_price', 'N/A')
+                    entry_price_display = getattr(t, 'entry_price', 'N/A') or 'N/A'
                     if entry_price_display is None: entry_price_display = "Market"
                     # Include more details like type? Fetch from MT5? Keep it simple for now.
                     # Access attributes of the TradeInfo object

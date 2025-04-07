@@ -62,7 +62,7 @@ async def _run_pre_execution_checks(
     max_total_lots = config_service_instance.getfloat('Trading', 'max_total_open_lots', fallback=0.0)
     if max_total_lots > 0:
         current_volume = 0.0
-        trade_symbol = signal_data.get('symbol', config_service_instance.get('MT5', 'symbol'))
+        trade_symbol = getattr(signal_data, 'symbol', None) or config_service_instance.get('MT5', 'symbol')
         positions = mt5.positions_get(symbol=trade_symbol) # Assumes MT5 connection is active
         if positions is not None:
             current_volume = round(sum(pos.volume for pos in positions), 8)
@@ -98,7 +98,13 @@ async def _run_pre_execution_checks(
 
     if is_market_order and cooldown_enabled and state_manager.is_market_cooldown_active(cooldown_seconds):
         logger.warning(f"{log_prefix} Market order cooldown active. Trade Aborted.")
-        status_message = f"⏳ <b>Trade Aborted</b> <code>[MsgID: {message_id}]</code>\n<b>Reason:</b> Market order cooldown active ({cooldown_seconds}s)."
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        remaining_seconds = cooldown_seconds
+        if state_manager.last_market_execution_time:
+            elapsed = (now - state_manager.last_market_execution_time).total_seconds()
+            remaining_seconds = max(0, cooldown_seconds - elapsed)
+        status_message = f"⏳ <b>Trade Aborted</b> <code>[MsgID: {message_id}]</code>\n<b>Reason:</b> Market order cooldown active ({remaining_seconds:.1f}s remaining)."
         duplicate_checker.add_processed_id(message_id) # Mark aborted as processed
         await telegram_sender.send_message(status_message, parse_mode='html')
         if debug_channel_id:
@@ -189,11 +195,28 @@ async def process_new_signal(signal_data: SignalData, message_id, state_manager:
         # based on the configured strategy, or "Market"/"N/A".
         exec_price = None
         if entry_price_raw not in ["Market", "N/A"]:
-             try:
-                 exec_price = float(entry_price_raw)
-             except (ValueError, TypeError):
-                  logger.error(f"{log_prefix} Invalid numeric entry price '{entry_price_raw}' received from SignalAnalyzer. Aborting trade.")
-                  return # Abort if price is invalid after analysis
+            try:
+                if isinstance(entry_price_raw, str) and '-' in entry_price_raw:
+                    # Check strategy
+                    entry_range_strategy = 'midpoint'  # default
+                    try:
+                        entry_range_strategy = config_service_instance.get('Strategy', 'entry_range_strategy', fallback='midpoint').lower()
+                    except:
+                        pass
+                    if entry_range_strategy == 'distributed':
+                        exec_price = None
+                        logger.info(f"{log_prefix} Entry range strategy is 'distributed', exec_price will be handled by strategy.")
+                    else:
+                        low_str, high_str = entry_price_raw.split('-', 1)
+                        low = float(low_str.strip())
+                        high = float(high_str.strip())
+                        exec_price = (low + high) / 2.0
+                        logger.info(f"{log_prefix} Parsed entry price range '{entry_price_raw}', using midpoint {exec_price}")
+                else:
+                    exec_price = float(entry_price_raw)
+            except (ValueError, TypeError):
+                logger.error(f"{log_prefix} Invalid numeric entry price '{entry_price_raw}' received from SignalAnalyzer. Aborting trade.")
+                return # Abort if price is invalid after analysis
 
         # --- Determine SL/TP for Execution based on Strategy ---
         exec_sl = None if sl_price == "N/A" else float(sl_price)

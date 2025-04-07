@@ -158,6 +158,7 @@ class SignalAnalyzer:
                 return {'type': 'ignore', 'data': None}
 
             # --- Post-processing, Validation, and Entry Price Strategy Application ---
+            entry_range_strategy = 'midpoint'  # Default if not set below
             entry_price_raw = llm_result.get("entry_price")
             entry_price_final = entry_price_raw # Default to raw value
             action = llm_result.get("action")

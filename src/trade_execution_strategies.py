@@ -361,7 +361,7 @@ class SingleTradeStrategy(ExecutionStrategy):
 <b>Entry:</b> {entry_str}
 <b>SL:</b> {sl_str} | <b>TP(s):</b> {tp_list_str} (Initial: {tp_str}{auto_tp_label})"""
             logger.info(f"{self.log_prefix} Trade executed successfully. Ticket: {ticket}")
-            await self.telegram_sender.send_message(status_message, parse_mode='html')
+            sent_msg = await self.telegram_sender.send_message(status_message, parse_mode='html')
 
             if self.debug_channel_id:
                 debug_msg_exec_success = f"✅ {self.log_prefix} Trade Executed Successfully.\n<b>Ticket:</b> <code>{ticket}</code>\n<b>Type:</b> <code>{order_type_str}</code>\n<b>Symbol:</b> <code>{self.trade_symbol}</code>\n<b>Volume:</b> <code>{self.lot_size}</code>\n<b>Entry:</b> {entry_str}\n<b>SL:</b> {sl_str}\n<b>TP(s):</b> {tp_list_str} (Initial: {tp_str}{auto_tp_label})"
@@ -374,6 +374,14 @@ class SingleTradeStrategy(ExecutionStrategy):
                 auto_tp_applied=self.auto_tp_applied,
                 take_profits_list_ref=self.take_profits_list
             )
+            # Store bot's execution message ID
+            if sent_msg:
+                try:
+                    trade_obj = self.state_manager.get_trade_by_ticket(ticket)
+                    if trade_obj:
+                        trade_obj.bot_msg_id = sent_msg.id
+                except:
+                    pass
             self.duplicate_checker.add_processed_id(self.message_id)
 
         else: # Single Execution failed

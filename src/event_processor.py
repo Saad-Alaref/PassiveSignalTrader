@@ -6,17 +6,18 @@ from datetime import datetime, timezone # Ensure datetime is imported from datet
 from telethon import events
 
 # Import necessary components (adjust as needed based on moved logic)
-from .state_manager import StateManager # Use relative import
-from .decision_logic import DecisionLogic # Use relative import
-from .trade_calculator import TradeCalculator # Use relative import
-from .mt5_executor import MT5Executor # Use relative import
-from .telegram_sender import TelegramSender # Use relative import
-from .signal_analyzer import SignalAnalyzer # Use relative import
-from .duplicate_checker import DuplicateChecker # Use relative import
-from .trade_execution_strategies import ( # Import new execution functions
-    execute_distributed_limits,
-    execute_multi_market_stop,
-    execute_single_trade,
+from src.state_manager import StateManager
+from src.models import SignalData
+from src.decision_logic import DecisionLogic
+from src.trade_calculator import TradeCalculator
+from src.mt5_executor import MT5Executor
+from src.telegram_sender import TelegramSender
+from src.signal_analyzer import SignalAnalyzer
+from src.duplicate_checker import DuplicateChecker
+from src.trade_execution_strategies import (
+    DistributedLimitsStrategy,
+    MultiMarketStopStrategy,
+    SingleTradeStrategy,
     parse_entry_range
 )
 from .update_commands import get_command # Import command factory

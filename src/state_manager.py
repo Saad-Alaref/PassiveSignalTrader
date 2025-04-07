@@ -1,5 +1,6 @@
 import logging
 import MetaTrader5 as mt5
+from typing import Union
 from collections import deque, defaultdict # Keep deque, defaultdict might be useful later
 from datetime import datetime, timezone, timedelta # Keep only this one
 from telethon import events
@@ -221,7 +222,7 @@ class StateManager:
         logger.info(f"Added pending confirmation: ID={confirmation_id}, MsgID={message_id}")
         logger.debug(f"Pending confirmation details for {confirmation_id}: {trade_details}")
 
-    def get_pending_confirmation(self, confirmation_id: str) -> dict | None:
+    def get_pending_confirmation(self, confirmation_id: str) -> Union[dict, None]:
         """
         Retrieves the details of a pending confirmation by its ID.
 

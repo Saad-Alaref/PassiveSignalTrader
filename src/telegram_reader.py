@@ -4,7 +4,7 @@ from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, FloodWaitError, UserDeactivatedBanError, AuthKeyError # Removed RpcError
 from telethon.sessions import StringSession
 # import configparser # No longer needed directly
-from .config_service import config_service # Import the service
+from src.config_service import config_service
 import sys
 import getpass # For password input if needed
 logger = logging.getLogger('TradeBot')
@@ -205,7 +205,9 @@ class TelegramReader:
 # to provide a dummy confirmation_handler if run.
 if __name__ == '__main__':
     # ... (imports for test) ...
-    from datetime import datetime # Import needed for test handler
+    import os
+    from datetime import datetime
+    from src.logger_setup import setup_logging
     from logger_setup import setup_logging
     from config_service import ConfigService # Import service for testing
 

@@ -1,10 +1,11 @@
 import MetaTrader5 as mt5
+import configparser
 import sys
 import logging
 import time
 import threading
 # import configparser # No longer needed directly
-from .config_service import config_service # Import the service
+from src.config_service import config_service
 
 logger = logging.getLogger('TradeBot')
 

@@ -1,7 +1,7 @@
 import logging
 import MetaTrader5 as mt5 # For order type constants
-from .mt5_data_fetcher import MT5DataFetcher # Use relative import
-from .models import SignalData # Import the dataclass
+from src.mt5_data_fetcher import MT5DataFetcher
+from src.models import SignalData
 logger = logging.getLogger('TradeBot')
 
 class DecisionLogic:
@@ -76,7 +76,7 @@ class DecisionLogic:
             except (ValueError, TypeError):
                  logger.error(f"Invalid or missing entry price for pending order: {signal_price_raw}")
             except (ValueError, TypeError):
-                logger.error(f"Invalid or missing entry price for pending order: {signal_price_str}")
+                logger.error(f"Invalid or missing entry price for pending order: {signal_price_raw}")
                 return False, "Invalid entry price", None
 
             # A. Price Action Check: Determine pending order type and score

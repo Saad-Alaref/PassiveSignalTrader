@@ -124,6 +124,13 @@ class DistributedLimitsStrategy(ExecutionStrategy):
             price_step = 0.0
         elif total_trades_to_open > 1:
             if high_price == low_price:
+                logger.warning(f"{self.log_prefix} Entry range has zero width ({low_price}-{high_price}). Placing all orders at {low_price}.")
+                price_step = 0.0
+            else:
+                price_step = (high_price - low_price) / (total_trades_to_open - 1)
+                logger.info(f"{self.log_prefix} Calculated price step for {total_trades_to_open} trades: {price_step}")
+        elif total_trades_to_open > 1:
+            if high_price == low_price:
                  logger.warning(f"{self.log_prefix} Entry range has zero width ({low_price}-{high_price}). Placing all orders at {low_price}.")
                  price_step = 0.0
             else:

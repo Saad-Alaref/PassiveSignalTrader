@@ -7,7 +7,7 @@ __pycache__/
 .env
 *.env
 
-config/*
+config/config*
 
 # Log files
 logs/*.log

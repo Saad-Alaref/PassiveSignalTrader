@@ -26,6 +26,8 @@ from .telegram_reader import TelegramReader # Use relative import
 from .telegram_sender import TelegramSender # Use relative import
 from .trade_manager import TradeManager # Use relative import
 from . import event_processor # Use relative import
+from .trade_closure_monitor import periodic_trade_closure_monitor_task, closed_trades_log
+from .daily_summary import daily_summary_task
 
 # --- Global Variables ---
 logger = None # Will be configured in main
@@ -464,10 +466,18 @@ async def run_bot():
     periodic_monitor_task = asyncio.create_task(periodic_mt5_monitor_task(monitor_interval), name="MT5MonitorTask")
     config_reload_interval = 30 # Check every 30 seconds (could be made configurable)
     config_reloader_task = asyncio.create_task(config_reloader_task_func(config_reload_interval), name="ConfigReloaderTask")
+    trade_closure_monitor_task = asyncio.create_task(
+        periodic_trade_closure_monitor_task(state_manager, telegram_sender, interval_seconds=60),
+        name="TradeClosureMonitorTask"
+    )
 
     logger.info("Bot main components started. Handing control to Telegram client...")
     # Run the reader client until it's disconnected (e.g., by signal handler)
     try:
+        daily_summary_task_handle = asyncio.create_task(
+            daily_summary_task(state_manager, telegram_sender),
+            name="DailySummaryTask"
+        )
         if telegram_reader and telegram_reader.client:
             # Also run the sender client if it's separate and needs to run
             # In this case, sender uses start() which doesn't block like run_until_disconnected

@@ -9,6 +9,7 @@ from .mt5_executor import MT5Executor
 from .telegram_sender import TelegramSender
 from .config_service import config_service
 from .models import TradeInfo, UpdateData # Import relevant models
+import MetaTrader5 as mt5
 
 logger = logging.getLogger('TradeBot')
 
@@ -104,6 +105,12 @@ class CloseTradeCommand(UpdateCommand):
     """Handles close_trade updates."""
     async def execute(self):
         action_description = "Close Trade"
+        # Check if position is already closed before attempting
+        pos_info = mt5.positions_get(ticket=self.ticket_to_update)
+        if not pos_info or len(pos_info) == 0:
+            logger.info(f"{self.log_prefix} Position {self.ticket_to_update} already closed before close attempt.")
+            await self._send_status_message(action_description, True)
+            return
         logger.info(f"{self.log_prefix} Attempting to close trade for ticket {self.ticket_to_update}")
         # For now, assumes full close
         success = self.mt5_executor.close_position(ticket=self.ticket_to_update)
@@ -112,7 +119,9 @@ class CloseTradeCommand(UpdateCommand):
             pos_info = mt5.positions_get(ticket=self.ticket_to_update)
             if not pos_info or len(pos_info) == 0:
                 logger.info(f"{self.log_prefix} Position {self.ticket_to_update} already closed.")
-                success = True
+                # Do not send failure message if already closed
+                await self._send_status_message(action_description, True)
+                return
         await self._send_status_message(action_description, success)
         mod_success = self.mt5_executor.close_position(self.ticket_to_update) # Close full position
         await self._send_status_message(action_description, mod_success)

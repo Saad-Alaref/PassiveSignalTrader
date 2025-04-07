@@ -235,6 +235,8 @@ async def handle_telegram_event(event):
         debug_msg_handler_err = f"🆘🆘🆘 {log_prefix} UNHANDLED EXCEPTION in event handler:\n<pre>{html.escape(str(handler_err))}</pre>"
         if debug_channel_id: await telegram_sender.send_message(debug_msg_handler_err, target_chat_id=debug_channel_id, parse_mode='html')
 
+# --- Callback Query Handler (REMOVED - Moved to TelegramSender) ---
+
 # --- Config Reloader Task ---
 async def config_reloader_task_func(interval_seconds=30):
     """Periodically checks config file for changes and reloads if necessary."""
@@ -414,7 +416,7 @@ async def run_bot():
         # Pass the shared_config object reference to components
         # Components needing dynamic updates must access shared_config directly later
         mt5_connector = MT5Connector(shared_config) # Uses config on init (restart required for changes)
-        mt5_fetcher = MT5DataFetcher(mt5_connector)
+        mt5_fetcher = MT5DataFetcher(mt5_connector) # Initialize fetcher early
         llm_interface = LLMInterface(shared_config) # Reads prompts dynamically now
         signal_analyzer = SignalAnalyzer(llm_interface, mt5_fetcher, shared_config) # Pass config ref
         # Duplicate checker size likely doesn't need hot-reload
@@ -423,9 +425,14 @@ async def run_bot():
         decision_logic = DecisionLogic(shared_config, mt5_fetcher) # Pass config ref
         trade_calculator = TradeCalculator(shared_config, mt5_fetcher) # Pass config ref
         mt5_executor = MT5Executor(shared_config, mt5_connector) # Pass config ref
-        telegram_reader = TelegramReader(shared_config, handle_telegram_event) # Uses config on init (restart required)
-        telegram_sender = TelegramSender(shared_config) # Uses config on init (restart required)
-        state_manager = StateManager(shared_config) # Pass config ref
+        state_manager = StateManager(shared_config) # Pass config ref (needed for sender now)
+
+        # Initialize TelegramSender *after* components it depends on
+        telegram_sender = TelegramSender(shared_config, state_manager, mt5_executor, mt5_connector, mt5_fetcher) # Pass components including mt5_fetcher
+
+        # Initialize TelegramReader (remove callback handler argument)
+        telegram_reader = TelegramReader(shared_config, handle_telegram_event) # Remove handle_callback_query
+
         # Initialize TradeManager after its dependencies
         trade_manager = TradeManager(shared_config, state_manager, mt5_executor, trade_calculator, telegram_sender, mt5_fetcher) # Pass config ref
     except Exception as e:
@@ -439,24 +446,24 @@ async def run_bot():
         sys.exit(1)
     logger.info("MT5 Connected.")
 
+    # Connect Sender *before* Reader, as Reader might receive messages needing sender actions
+    logger.info("Starting Telegram Sender (Bot Account)...")
+    sender_started = await telegram_sender.connect() # Connect sender (this now adds the callback handler)
+    if not sender_started:
+         logger.critical("Failed to start Telegram Sender. Exiting.")
+         mt5_connector.disconnect()
+         sys.exit(1)
+    logger.info("Telegram Sender Started.")
+
     logger.info("Starting Telegram Reader (User Account)...")
     reader_started = await telegram_reader.start() # Start reader
     if not reader_started:
          logger.critical("Failed to start Telegram Reader. Exiting.")
+         await telegram_sender.disconnect() # Disconnect sender before exiting
          mt5_connector.disconnect()
          sys.exit(1)
     logger.info("Telegram Reader Started.")
 
-    logger.info("Starting Telegram Sender (Bot Account)...")
-    sender_started = await telegram_sender.connect() # Connect sender
-    if not sender_started:
-         # Log critical error but maybe don't exit? App can still read.
-         # Or exit if sending status is essential. Let's exit for now.
-         logger.critical("Failed to start Telegram Sender. Exiting.")
-         await telegram_reader.stop() # Stop reader before exiting
-         mt5_connector.disconnect()
-         sys.exit(1)
-    logger.info("Telegram Sender Started.")
 
     # 5. Run main loop until shutdown signal
     # Start the periodic tasks using initial config values
@@ -469,6 +476,9 @@ async def run_bot():
     # Run the reader client until it's disconnected (e.g., by signal handler)
     try:
         if telegram_reader and telegram_reader.client:
+            # Also run the sender client if it's separate and needs to run
+            # In this case, sender uses start() which doesn't block like run_until_disconnected
+            # We rely on the reader's run_until_disconnected to keep the loop alive
             await telegram_reader.client.run_until_disconnected()
         else:
             logger.error("Telegram reader client not initialized, cannot run.")

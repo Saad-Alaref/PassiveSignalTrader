@@ -1,25 +1,51 @@
 import logging
 import asyncio
-from telethon import TelegramClient
-from telethon.errors import FloodWaitError, UserDeactivatedBanError, AuthKeyError
-from telethon.tl.custom import Button
+import re # For parsing callback data
+import html # For escaping HTML
+import uuid # To generate unique IDs for confirmations
 import configparser
 import sys
-import uuid # To generate unique IDs for confirmations
+from datetime import datetime, timezone, timedelta
+
+import MetaTrader5 as mt5 # Import the MT5 library
+from telethon import TelegramClient, events # Import events
+from telethon.errors import FloodWaitError, UserDeactivatedBanError, AuthKeyError, MessageNotModifiedError, MessageIdInvalidError
+from telethon.tl.custom import Button
+
+# Import component types for type hinting
+from .state_manager import StateManager
+from .mt5_executor import MT5Executor
+from .mt5_connector import MT5Connector
+from .mt5_data_fetcher import MT5DataFetcher # Import MT5DataFetcher
+
 
 logger = logging.getLogger('TradeBot')
 
 class TelegramSender:
-    """Handles connection to Telegram as a BOT account specifically for sending messages."""
+    """
+    Handles connection to Telegram as a BOT account, sends messages,
+    and now also handles callback queries from its own messages.
+    """
 
-    def __init__(self, config: configparser.ConfigParser):
+    def __init__(self, config: configparser.ConfigParser,
+                 state_manager: StateManager, mt5_executor: MT5Executor,
+                 mt5_connector: MT5Connector, mt5_fetcher: MT5DataFetcher): # Added mt5_fetcher
         """
         Initializes the TelegramSender. Connects as a BOT.
 
         Args:
             config (configparser.ConfigParser): The application configuration.
+            state_manager (StateManager): Instance for managing state.
+            mt5_executor (MT5Executor): Instance for executing trades.
+            mt5_connector (MT5Connector): Instance for MT5 connection checks.
+            mt5_fetcher (MT5DataFetcher): Instance for fetching market data.
         """
         self.config = config
+        self.state_manager = state_manager
+        self.mt5_executor = mt5_executor
+        self.mt5_connector = mt5_connector
+        self.mt5_fetcher = mt5_fetcher # Store mt5_fetcher
+
         # Need api_id/hash even for bot connection via Telethon library
         self.api_id = config.getint('Telegram', 'api_id')
         self.api_hash = config.get('Telegram', 'api_hash')
@@ -118,7 +144,7 @@ class TelegramSender:
 
 
     async def connect(self):
-        """Connects and authorizes the bot client."""
+        """Connects and authorizes the bot client and adds callback handler."""
         if not self.bot_token:
             logger.error("Cannot connect sender: Bot token is missing.")
             return False
@@ -129,38 +155,37 @@ class TelegramSender:
         try:
             logger.info("Connecting sender client to Telegram...")
             # Use start with bot_token. It handles connect() and authorization.
-            # The start() method returns the client itself upon success.
             sender_client = await self.client.start(bot_token=self.bot_token)
+            if not sender_client or not self.client.is_connected():
+                 logger.critical("Failed to start or connect the Telegram sender client using token.")
+                 return False
             logger.info("Sender client connected and authorized successfully using token.")
             print("Telegram Sender connected.")
 
             # Get and store the sender bot's own ID
-            if sender_client:
-                me = await sender_client.get_me()
-                if me:
-                    self.sender_bot_id = me.id
-                    logger.info(f"Stored Sender Bot ID: {self.sender_bot_id}")
-                else:
-                    logger.error("Could not get sender bot's own ID after connection.")
+            me = await self.client.get_me()
+            if me:
+                self.sender_bot_id = me.id
+                logger.info(f"Stored Sender Bot ID: {self.sender_bot_id}")
             else:
-                 logger.error("Sender client object not returned from start(). Cannot get bot ID.")
+                logger.error("Could not get sender bot's own ID after connection.")
 
-
-            # Resolve channel ID after successful connection
+            # Resolve channel IDs
             if not await self._resolve_target_channel():
-                 logger.error("Sender connected but failed to resolve target channel ID. Sending will fail.")
                  logger.error("Sender connected but failed to resolve main target channel ID. Sending to main channel will fail.")
-                 # Allow connection if debug channel resolves, otherwise fail
-                 # return True # Connected, but main channel resolution failed
+                 # Continue if debug channel resolves? For now, require main channel.
+                 # return False # Uncomment if main channel is strictly required
 
-            # Resolve debug channel ID if configured
-            await self._resolve_debug_channel() # Log messages inside this method
+            await self._resolve_debug_channel()
 
-            # Fail connection if main channel resolution failed
-            if not self.target_channel_id:
-                 return False
+            # Fail connection if main channel resolution failed (if strictly required)
+            # if not self.target_channel_id:
+            #      return False
 
-            return True
+            # --- Add Callback Query Handler ---
+            self.client.add_event_handler(self._handle_callback_query, events.CallbackQuery)
+            logger.info("Added callback query handler to sender client.")
+            # --- End Handler Addition ---
 
             return True
 
@@ -170,7 +195,6 @@ class TelegramSender:
             if self.client and self.client.is_connected(): await self.client.disconnect()
             return False
         except (UserDeactivatedBanError, AuthKeyError) as auth_err:
-             # These might occur if api_id/hash are invalid, even with a valid bot token sometimes
              logger.critical(f"Sender authorization failed: {auth_err}. Check API credentials.")
              print(f"CRITICAL: Telegram sender authorization failed ({auth_err}). Check api_id/api_hash.", file=sys.stderr)
              if self.client and self.client.is_connected(): await self.client.disconnect()
@@ -233,15 +257,6 @@ class TelegramSender:
     async def send_confirmation_message(self, confirmation_id: str, trade_details: dict, message_text: str, target_chat_id=None):
         """
         Sends a message with Yes/No inline buttons for trade confirmation.
-
-        Args:
-            confirmation_id (str): A unique identifier for this confirmation request.
-            trade_details (dict): Dictionary containing details about the trade (e.g., symbol, action, volume). Used for logging/context.
-            message_text (str): The main text of the message asking for confirmation.
-            target_chat_id (int, optional): Specific chat ID to send to. Defaults to the main configured channel.
-
-        Returns:
-            telethon.tl.custom.message.Message or None: The sent message object if successful, otherwise None.
         """
         if not self.client or not self.client.is_connected():
             logger.error("Cannot send confirmation message, Telegram Sender client not connected.")
@@ -260,7 +275,6 @@ class TelegramSender:
                 Button.inline("✅ Yes", data=f"confirm_yes_{confirmation_id}"),
                 Button.inline("❌ No", data=f"confirm_no_{confirmation_id}")
             ]
-            # Can add more rows if needed
         ]
 
         try:
@@ -296,3 +310,259 @@ class TelegramSender:
             except Exception as fallback_e:
                 logger.error(f"Failed to send plain text fallback confirmation message (ID: {confirmation_id}): {fallback_e}", exc_info=True)
                 return None
+
+    # --- Internal Callback Query Handler ---
+    async def _handle_callback_query(self, event: events.CallbackQuery.Event):
+        """Internal handler for callback queries received by this bot client."""
+        confirmation_id = "N/A" # Default for logging if parsing fails
+        log_prefix = "[CallbackQuery]" # Base prefix
+        try:
+            callback_data = event.data.decode('utf-8')
+            log_prefix_base = f"[Callback User: {event.sender_id}]"
+            logger.info(f"{log_prefix_base} Received callback query with data: {callback_data}")
+
+            match = re.match(r"confirm_(yes|no)_([a-f0-9\-]+)", callback_data)
+
+            if not match:
+                logger.warning(f"{log_prefix_base} Received callback query with unexpected data format: {callback_data}")
+                await event.answer("Unknown request format.", alert=True)
+                return
+
+            choice = match.group(1)
+            confirmation_id = match.group(2)
+            log_prefix = f"[Callback ConfID: {confirmation_id}]"
+            logger.info(f"{log_prefix} Parsed confirmation. Choice: '{choice}', User: {event.sender_id}")
+
+            final_message_text = ""
+            alert_answer = False
+            answer_text = ""
+
+            # 1. Get Pending Confirmation Details
+            logger.debug(f"{log_prefix} Attempting to get pending confirmation details...")
+            pending_conf = self.state_manager.get_pending_confirmation(confirmation_id)
+
+            if not pending_conf:
+                logger.warning(f"{log_prefix} Confirmation ID not found or already processed.")
+                answer_text = "This confirmation request is invalid or has expired."
+                alert_answer = True
+                await event.answer(answer_text, alert=alert_answer)
+                return
+
+            conf_timestamp = pending_conf['timestamp']
+            conf_message_id = pending_conf['message_id']
+            trade_params = pending_conf['trade_details']
+            original_signal_msg_id = trade_params.get('original_signal_msg_id', 'N/A')
+            logger.debug(f"{log_prefix} Found pending confirmation. MsgID: {conf_message_id}, Timestamp: {conf_timestamp}")
+
+            # Prepare details for status messages (used in multiple outcomes)
+            action_str = trade_params.get('action', 'N/A')
+            symbol_str = trade_params.get('symbol', 'N/A')
+            volume_str = trade_params.get('volume', 'N/A')
+            sl_param = trade_params.get('sl')
+            tp_param = trade_params.get('tp')
+            sl_str_fmt = f"<code>{sl_param}</code>" if sl_param is not None else "<i>None</i>"
+            tp_str_fmt = f"<code>{tp_param}</code>" if tp_param is not None else "<i>None</i>"
+
+            # --- Fetch Current Price ---
+            current_price_str = "<i>N/A</i>"
+            if self.mt5_fetcher and symbol_str != 'N/A':
+                tick = self.mt5_fetcher.get_symbol_tick(symbol_str)
+                if tick:
+                    current_price_str = f"Bid: <code>{tick.bid}</code> Ask: <code>{tick.ask}</code>"
+                    logger.debug(f"{log_prefix} Fetched current price: {current_price_str}")
+                else:
+                    logger.warning(f"{log_prefix} Could not fetch current tick for {symbol_str}.")
+                    current_price_str = "<i>Error fetching</i>"
+            # --- End Fetch Current Price ---
+
+
+            # 2. Check Expiry
+            logger.debug(f"{log_prefix} Checking expiry...")
+            timeout_minutes = self.config.getint('Trading', 'market_confirmation_timeout_minutes', fallback=3)
+            expiry_time = conf_timestamp + timedelta(minutes=timeout_minutes)
+            now = datetime.now(timezone.utc)
+
+            if now > expiry_time:
+                logger.warning(f"{log_prefix} Confirmation request expired (Expiry: {expiry_time}, Now: {now}).")
+                answer_text = "This confirmation request has expired."
+                alert_answer = True
+                expiry_time_str = expiry_time.strftime('%Y-%m-%d %H:%M:%S %Z')
+                # Construct Expired message
+                final_message_text = f"""⏳ <b>Confirmation Expired</b> <code>[OrigMsgID: {original_signal_msg_id}]</code>
+
+<b>Action:</b> <code>{action_str}</code>
+<b>Symbol:</b> <code>{symbol_str}</code>
+<b>Volume:</b> <code>{volume_str}</code>
+<b>SL:</b> {sl_str_fmt} | <b>TP:</b> {tp_str_fmt}
+<b>Price at Expiry:</b> {current_price_str}
+<i>(Expired at {expiry_time_str})</i>"""
+                logger.debug(f"{log_prefix} Removing expired confirmation from state...")
+                self.state_manager.remove_pending_confirmation(confirmation_id)
+                try:
+                    logger.debug(f"{log_prefix} Attempting to edit message for expiry...")
+                    await event.edit(final_message_text, parse_mode='html', buttons=None)
+                    logger.debug(f"{log_prefix} Edited message for expiry.")
+                except MessageNotModifiedError:
+                     logger.warning(f"{log_prefix} Message was not modified (likely already expired/edited).")
+                except Exception as edit_err:
+                    logger.error(f"{log_prefix} Failed to edit confirmation message after expiry: {edit_err}")
+                logger.debug(f"{log_prefix} Answering callback for expiry...")
+                await event.answer(answer_text, alert=alert_answer)
+                return
+
+            # 3. Process Choice ('yes' or 'no')
+            # --- IMPORTANT: Remove pending confirmation *immediately* ---
+            logger.debug(f"{log_prefix} Attempting to remove pending confirmation from state...")
+            if not self.state_manager.remove_pending_confirmation(confirmation_id):
+                logger.warning(f"{log_prefix} Confirmation ID was already removed before processing choice '{choice}'. Ignoring duplicate callback.")
+                await event.answer("Request already processed.", alert=True)
+                return
+            logger.info(f"{log_prefix} Removed pending confirmation from state.")
+            # --- End Immediate Removal ---
+
+            if choice == 'yes':
+                logger.info(f"{log_prefix} User confirmed trade. Processing execution...")
+                answer_text = "Processing trade execution..."
+                alert_answer = False
+                logger.debug(f"{log_prefix} Answering callback before execution...")
+                await event.answer(answer_text, alert=alert_answer) # Answer immediately
+
+                # Ensure MT5 connection
+                logger.debug(f"{log_prefix} Ensuring MT5 connection...")
+                if not self.mt5_connector.ensure_connection():
+                     logger.error(f"{log_prefix} MT5 connection failed. Cannot execute confirmed trade.")
+                     answer_text = "Error: Cannot connect to trading platform."
+                     alert_answer = True
+                     # Construct Connection Failed message
+                     final_message_text = f"""❌ <b>Execution Failed</b> (User Confirmed) <code>[OrigMsgID: {original_signal_msg_id}]</code>
+
+<b>Action:</b> <code>{action_str}</code>
+<b>Symbol:</b> <code>{symbol_str}</code>
+<b>Volume:</b> <code>{volume_str}</code>
+<b>SL:</b> {sl_str_fmt} | <b>TP:</b> {tp_str_fmt}
+<b>Price at Attempt:</b> {current_price_str}
+<b>Reason:</b> Could not connect to MT5."""
+                     # State already removed
+                else:
+                    logger.info(f"{log_prefix} MT5 connection OK. Executing trade...")
+                    # Execute the trade
+                    execution_args = {
+                        "action": trade_params.get('action'), "symbol": trade_params.get('symbol'),
+                        "order_type": trade_params.get('order_type'), "volume": trade_params.get('volume'),
+                        "price": trade_params.get('price'), "sl": trade_params.get('sl'),
+                        "tp": trade_params.get('tp'), "comment": trade_params.get('comment')
+                    }
+                    logger.debug(f"{log_prefix} Executing trade with filtered args: {execution_args}")
+                    trade_result_tuple = self.mt5_executor.execute_trade(**execution_args)
+                    trade_result, actual_exec_price = trade_result_tuple if trade_result_tuple else (None, None)
+                    logger.info(f"{log_prefix} Trade execution result: {trade_result_tuple}")
+
+                    if trade_result and trade_result.retcode == mt5.TRADE_RETCODE_DONE:
+                        ticket = trade_result.order
+                        open_time = datetime.now(timezone.utc)
+                        final_entry_price = actual_exec_price
+                        entry_price_str = f"<code>@{final_entry_price}</code>" if final_entry_price is not None else "<i>(Price not returned by MT5)</i>"
+                        logger.info(f"{log_prefix} Confirmed trade executed successfully. Ticket: {ticket}, Actual Entry: {entry_price_str}")
+
+                        # Construct Success message
+                        final_message_text = f"""✅ <b>Trade Executed</b> (User Confirmed) <code>[OrigMsgID: {original_signal_msg_id}]</code>
+
+<b>Ticket:</b> <code>{ticket}</code>
+<b>Symbol:</b> <code>{symbol_str}</code>
+<b>Action:</b> <code>{action_str}</code>
+<b>Volume:</b> <code>{volume_str}</code>
+<b>Actual Entry:</b> {entry_price_str}
+<b>SL:</b> {sl_str_fmt} | <b>TP:</b> {tp_str_fmt}
+<b>Price at Execution:</b> {current_price_str}"""
+                        answer_text = f"Trade executed! Ticket: {ticket}"
+                        alert_answer = False
+
+                        logger.debug(f"{log_prefix} Recording market execution time...")
+                        self.state_manager.record_market_execution()
+
+                        logger.debug(f"{log_prefix} Storing active trade info...")
+                        trade_info = {
+                            'ticket': ticket, 'symbol': trade_params['symbol'], 'open_time': open_time,
+                            'original_msg_id': original_signal_msg_id, 'entry_price': final_entry_price,
+                            'initial_sl': trade_params.get('sl'), 'original_volume': trade_params['volume'],
+                            'all_tps': [], # TODO: Need original TPs here
+                            'tp_strategy': self.config.get('Strategy', 'tp_execution_strategy', fallback='first_tp_full_close').lower(),
+                            'next_tp_index': 0, 'tsl_active': False
+                        }
+                        if self.state_manager:
+                            auto_tp_was_applied = trade_params.get('auto_tp_applied', False)
+                            self.state_manager.add_active_trade(trade_info, auto_tp_applied=auto_tp_was_applied)
+                            if self.config.getboolean('AutoSL', 'enable_auto_sl', fallback=False) and trade_params.get('sl') is None:
+                                self.state_manager.mark_trade_for_auto_sl(ticket)
+                            logger.debug(f"{log_prefix} Active trade info stored.")
+                        else:
+                            logger.error(f"{log_prefix} Cannot store active trade info: StateManager not available.")
+
+                    else: # Execution failed
+                        error_comment = getattr(trade_result, 'comment', 'Unknown Error') if trade_result else 'None Result'
+                        error_code = getattr(trade_result, 'retcode', 'N/A') if trade_result else 'N/A'
+                        logger.error(f"{log_prefix} Confirmed trade execution FAILED. Result: {trade_result_tuple}")
+                        safe_comment = html.escape(str(error_comment))
+                        # Construct Execution Failed message
+                        final_message_text = f"""❌ <b>Execution Failed</b> (User Confirmed) <code>[OrigMsgID: {original_signal_msg_id}]</code>
+
+<b>Action:</b> <code>{action_str}</code>
+<b>Symbol:</b> <code>{symbol_str}</code>
+<b>Volume:</b> <code>{volume_str}</code>
+<b>SL:</b> {sl_str_fmt} | <b>TP:</b> {tp_str_fmt}
+<b>Price at Attempt:</b> {current_price_str}
+<b>Reason:</b> {safe_comment} (Code: <code>{error_code}</code>)"""
+                        answer_text = "Trade execution failed. Check logs."
+                        alert_answer = True
+                    # State already removed
+
+            elif choice == 'no':
+                logger.info(f"{log_prefix} User rejected trade.")
+                answer_text = "Trade rejected by user."
+                alert_answer = False
+                # Construct Rejected message
+                final_message_text = f"""❌ <b>Trade Rejected</b> (User Cancelled) <code>[OrigMsgID: {original_signal_msg_id}]</code>
+
+<b>Action:</b> <code>{action_str}</code>
+<b>Symbol:</b> <code>{symbol_str}</code>
+<b>Volume:</b> <code>{volume_str}</code>
+<b>SL:</b> {sl_str_fmt} | <b>TP:</b> {tp_str_fmt}
+<b>Price at Rejection:</b> {current_price_str}"""
+                # State already removed
+                logger.debug(f"{log_prefix} Answering callback for rejection...")
+                await event.answer(answer_text, alert=alert_answer) # Answer before editing
+
+            else: # Should not happen
+                logger.warning(f"{log_prefix} Unknown choice '{choice}' received.")
+                answer_text = "Unknown choice received."
+                alert_answer = True
+                await event.answer(answer_text, alert=alert_answer)
+                # State already removed
+                return # Don't edit message
+
+            # 4. Edit Original Confirmation Message (if text was set)
+            if final_message_text:
+                try:
+                    logger.debug(f"{log_prefix} Attempting to edit message with final status...")
+                    await event.edit(final_message_text, parse_mode='html', buttons=None) # Remove buttons after editing
+                    logger.info(f"{log_prefix} Edited original confirmation message (ID: {conf_message_id}).")
+                except MessageNotModifiedError:
+                     logger.warning(f"{log_prefix} Message was not modified (likely already edited).")
+                except Exception as edit_err:
+                    logger.error(f"{log_prefix} Failed to edit confirmation message (ID: {conf_message_id}): {edit_err}")
+                    # If edit fails, maybe try answering again with the final status?
+                    if choice == 'yes': # Only for 'yes' path where initial answer was temporary
+                         try:
+                              logger.debug(f"{log_prefix} Edit failed, attempting to answer callback again with final status...")
+                              await event.answer(answer_text, alert=alert_answer)
+                         except Exception as answer_again_err:
+                              logger.error(f"{log_prefix} Failed to answer callback again after edit error: {answer_again_err}")
+
+
+        except Exception as callback_err:
+            logger.error(f"{log_prefix} Unhandled error in _handle_callback_query: {callback_err}", exc_info=True)
+            try:
+                logger.debug(f"{log_prefix} Answering callback due to unhandled error...")
+                await event.answer("An internal error occurred processing the confirmation.", alert=True)
+            except Exception as final_answer_err:
+                logger.error(f"{log_prefix} Failed to answer callback query after unhandled error: {final_answer_err}")

@@ -1,7 +1,8 @@
 import logging
 import json
 import MetaTrader5 as mt5
-from datetime import datetime, timezone
+import uuid # Add this import
+from datetime import datetime, timezone # Ensure datetime is imported from datetime
 from telethon import events
 
 # Import necessary components (adjust as needed based on moved logic)
@@ -229,6 +230,74 @@ async def process_new_signal(signal_data, message_id, state_manager: StateManage
                 await telegram_sender.send_message(debug_msg_cooldown, target_chat_id=debug_channel_id)
             return # Stop processing this signal
 
+        # --- NEW: Check if Market Order requires confirmation ---
+        if is_market_order:
+            # --- Confirmation Logic ---
+            logger.info(f"{log_prefix} Market order detected. Preparing confirmation request.")
+            confirmation_id = str(uuid.uuid4()) # Generate unique ID
+            confirmation_timeout_minutes = config.getint('Trading', 'market_confirmation_timeout_minutes', fallback=3)
+
+            # Prepare parameters needed for execution if confirmed
+            trade_params_for_confirmation = {
+                'action': action,
+                'symbol': trade_symbol,
+                'order_type': determined_order_type, # Should be BUY or SELL
+                'volume': lot_size,
+                'price': None, # Market order uses None for price
+                'sl': exec_sl,
+                'tp': exec_tp,
+                'comment': f"TB SigID {message_id} ConfID {confirmation_id[:8]}", # Include conf ID part
+                'original_signal_msg_id': message_id, # Add original signal message ID
+                'auto_tp_applied': auto_tp_applied # Add AutoTP status
+            }
+
+            # Format the message for the user
+            action_str = "BUY" if action == "BUY" else "SELL"
+            symbol_str_safe = trade_symbol.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            sl_str_conf = f"<code>{exec_sl}</code>" if exec_sl is not None else "<i>None</i>"
+            tp_str_conf = f"<code>{exec_tp}</code>" if exec_tp is not None else "<i>None</i>"
+            confirmation_text = f"""❓ <b>Confirm Market Trade?</b> <code>[MsgID: {message_id}]</code>
+
+<b>Action:</b> <code>{action_str}</code>
+<b>Symbol:</b> <code>{symbol_str_safe}</code>
+<b>Volume:</b> <code>{lot_size}</code>
+<b>SL:</b> {sl_str_conf} | <b>TP:</b> {tp_str_conf}
+
+<i>This confirmation expires in {confirmation_timeout_minutes} minutes.</i>"""
+
+            # Send the message with buttons
+            sent_conf_message = await telegram_sender.send_confirmation_message(
+                confirmation_id=confirmation_id,
+                trade_details=trade_params_for_confirmation, # Pass details for logging/context
+                message_text=confirmation_text
+            )
+
+            if sent_conf_message:
+                logger.info(f"{log_prefix} Confirmation message sent (ConfID: {confirmation_id}, MsgID: {sent_conf_message.id}). Awaiting user response.")
+                # Store pending confirmation details in StateManager
+                state_manager.add_pending_confirmation(
+                    confirmation_id=confirmation_id,
+                    trade_details=trade_params_for_confirmation,
+                    message_id=sent_conf_message.id,
+                    timestamp=datetime.now(timezone.utc)
+                )
+                # No separate status update needed, the confirmation message itself serves this purpose.
+
+            else:
+                logger.error(f"{log_prefix} Failed to send confirmation message for market order.")
+                # Send failure status
+                status_message_fail = f"❌ <b>Confirmation FAILED</b> <code>[MsgID: {message_id}]</code>\nCould not send confirmation message. Trade aborted."
+                await telegram_sender.send_message(status_message_fail, parse_mode='html')
+
+            # Mark original signal message as processed (handled via confirmation)
+            duplicate_checker.add_processed_id(message_id)
+            # IMPORTANT: Return here to prevent falling through to execution
+            return
+
+        else:
+            # --- Existing Execution Logic (Moved here) ---
+            # 6. Execute Trade (Pending Orders)
+            logger.info(f"{log_prefix} Pending order detected. Proceeding with direct execution.")
         # 6. Execute Trade
         trade_result_tuple = mt5_executor.execute_trade(
             action=action,
@@ -242,7 +311,7 @@ async def process_new_signal(signal_data, message_id, state_manager: StateManage
         )
         trade_result, actual_exec_price = trade_result_tuple if trade_result_tuple else (None, None)
 
-        # 6. Handle Execution Result
+        # 6. Handle Execution Result (Moved)
         if trade_result and trade_result.retcode == mt5.TRADE_RETCODE_DONE:
             ticket = trade_result.order
             open_time = datetime.now(timezone.utc)
@@ -281,19 +350,18 @@ async def process_new_signal(signal_data, message_id, state_manager: StateManage
                 debug_msg_exec_success = f"✅ {log_prefix} Trade Executed Successfully.\n<b>Ticket:</b> <code>{ticket}</code>\n<b>Type:</b> <code>{order_type_str}</code>\n<b>Symbol:</b> <code>{trade_symbol}</code>\n<b>Volume:</b> <code>{lot_size}</code>\n<b>Entry:</b> {entry_str}\n<b>SL:</b> {sl_str}\n<b>TP(s):</b> {tp_list_str} (Initial: {tp_str}{auto_tp_label})"
                 await telegram_sender.send_message(debug_msg_exec_success, target_chat_id=debug_channel_id, parse_mode='html') # Ensure parse_mode for debug
 
-            # Store trade info and mark for AutoSL if needed
+            # Store trade info and mark for AutoSL if needed (Moved)
             trade_info = {
                 'ticket': ticket, 'symbol': trade_symbol, 'open_time': open_time,
                 'original_msg_id': message_id, 'entry_price': final_entry_price,
                 'initial_sl': exec_sl,
-                'original_volume': lot_size, # Store original volume
+                'original_volume': lot_size,
                 'all_tps': take_profits_list,
                 'tp_strategy': tp_strategy,
-                'next_tp_index': 0, # Start monitoring the first TP (index 0)
-                # 'partially_closed': False # Removed, using next_tp_index to track progress
+                'next_tp_index': 0,
+                'tsl_active': False # Ensure TSL flag is initialized here too
             }
             if state_manager:
-                # Pass the auto_tp_applied flag when adding the trade
                 state_manager.add_active_trade(trade_info, auto_tp_applied=auto_tp_applied)
                 if config.getboolean('AutoSL', 'enable_auto_sl', fallback=False) and exec_sl is None:
                     state_manager.mark_trade_for_auto_sl(ticket)
@@ -302,11 +370,12 @@ async def process_new_signal(signal_data, message_id, state_manager: StateManage
 
             duplicate_checker.add_processed_id(message_id) # Mark as processed only on success
 
-            # Record market execution time if it was a market order
-            if is_market_order and state_manager:
-                state_manager.record_market_execution()
+            # Record market execution time if it was a market order (This check is now redundant here)
+            # Market execution time should be recorded *after* confirmation and successful execution
+            # if is_market_order and state_manager:
+            #     state_manager.record_market_execution()
 
-        else: # Execution failed
+        else: # Execution failed (Moved)
             error_comment = getattr(trade_result, 'comment', 'Unknown Error') if trade_result else 'None Result (Check Logs)'
             error_code = getattr(trade_result, 'retcode', 'N/A') if trade_result else 'N/A'
             safe_comment = str(error_comment).replace('&', '&amp;').replace('<', '<').replace('>', '>')

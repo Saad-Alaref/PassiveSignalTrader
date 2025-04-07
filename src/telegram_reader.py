@@ -6,7 +6,6 @@ from telethon.sessions import StringSession
 import configparser
 import sys
 import getpass # For password input if needed
-import re # For parsing callback data
 logger = logging.getLogger('TradeBot')
 
 # Note: Removed the raw_update_handler as it's no longer needed for this approach
@@ -14,8 +13,7 @@ logger = logging.getLogger('TradeBot')
 class TelegramReader:
     """Handles connection to Telegram as a USER account to monitor a specific channel."""
 
-    # Add confirmation_handler_callback to __init__
-    def __init__(self, config: configparser.ConfigParser, message_handler_callback, confirmation_handler_callback):
+    def __init__(self, config: configparser.ConfigParser, message_handler_callback): # Removed confirmation_handler_callback
         """
         Initializes the TelegramReader. Connects as a USER.
 
@@ -23,8 +21,6 @@ class TelegramReader:
             config (configparser.ConfigParser): The application configuration.
             message_handler_callback (callable): An async function to call for new/edited messages.
                                                  Accepts the Telethon event object.
-            confirmation_handler_callback (callable): An async function to call for button clicks (CallbackQuery).
-                                                      Accepts (confirmation_id: str, choice: str, event: events.CallbackQuery.Event).
         """
         self.config = config
         # Read required fields - validation ensures they exist
@@ -44,7 +40,6 @@ class TelegramReader:
         self.client = None
         self.target_channel_id = None
         self.message_handler = message_handler_callback # Store the callback for received messages
-        self.confirmation_handler = confirmation_handler_callback # Store the callback for button clicks
 
         # Validation for api_id/api_hash should be handled by config_loader
 
@@ -169,11 +164,7 @@ class TelegramReader:
                 events.MessageEdited(chats=[self.target_channel_id])
             )
 
-            # Register the new callback query handler
-            self.client.add_event_handler(
-                self._handle_callback_query,
-                events.CallbackQuery
-            )
+            # Callback query handler is now in TelegramSender
 
             logger.info(f"Listening for messages, edits, and button clicks in channel ID: {self.target_channel_id}...")
             print(f"Telegram Reader (User Account) started. Listening to channel ID: {self.target_channel_id}")
@@ -206,51 +197,6 @@ class TelegramReader:
             logger.info("Telegram Reader client disconnected.")
         else:
             logger.info("Telegram Reader client already disconnected or not initialized.")
-    async def _handle_callback_query(self, event: events.CallbackQuery.Event):
-        """Handles incoming callback queries from inline buttons."""
-        # Decode data - it's bytes, needs decoding
-        callback_data = event.data.decode('utf-8')
-        logger.info(f"Received callback query with data: {callback_data} from user {event.sender_id}")
-
-        # Basic parsing: expecting "confirm_yes_{uuid}" or "confirm_no_{uuid}"
-        match = re.match(r"confirm_(yes|no)_([a-f0-9\-]+)", callback_data)
-
-        if match:
-            choice = match.group(1) # 'yes' or 'no'
-            confirmation_id = match.group(2) # The UUID part
-            logger.debug(f"Parsed confirmation: ID={confirmation_id}, Choice={choice}")
-
-            if self.confirmation_handler:
-                try:
-                    # Pass control to the dedicated handler in the main logic
-                    await self.confirmation_handler(confirmation_id, choice, event)
-                except Exception as e:
-                    logger.error(f"Error processing confirmation callback (ID: {confirmation_id}): {e}", exc_info=True)
-                    # Answer the query with a generic error to provide feedback
-                    try:
-                        await event.answer("An error occurred while processing your request.", alert=True)
-                    except Exception as answer_e:
-                        logger.error(f"Failed to answer callback query after error: {answer_e}")
-            else:
-                logger.warning(f"No confirmation handler configured to process callback: {callback_data}")
-                # Answer the query anyway so the button doesn't spin forever
-                try:
-                    await event.answer("Cannot process this request (no handler).", alert=True)
-                except Exception as answer_e:
-                     logger.error(f"Failed to answer callback query (no handler): {answer_e}")
-
-        else:
-            logger.warning(f"Received callback query with unexpected data format: {callback_data}")
-            # Optionally answer for unknown formats too
-            try:
-                await event.answer("Unknown request format.", alert=True)
-            except Exception as answer_e:
-                 logger.error(f"Failed to answer callback query (unknown format): {answer_e}")
-
-
-    async def stop(self):
-       # ... (existing stop method) ...
-       pass
 
 # ... (Example usage section might need adjustment if run standalone,
 #      as it now requires a confirmation_handler) ...
@@ -267,28 +213,12 @@ if __name__ == '__main__':
         # ... (existing test_handler logic for messages) ...
         pass
 
-    async def test_confirmation_handler(confirmation_id, choice, event):
-        """A simple confirmation handler for testing."""
-        print("-" * 20)
-        print(f"[{datetime.now()}] Confirmation Received:")
-        print(f"  Confirmation ID: {confirmation_id}")
-        print(f"  User Choice: {choice}")
-        print(f"  User ID: {event.sender_id}")
-        print(f"  Message ID: {event.message_id}")
-        print("-" * 20)
-        # In a real scenario, you'd look up the ID, check time, etc.
-        # Answer the callback query for testing
-        try:
-            await event.answer(f"Processed choice: {choice}", alert=False)
-        except Exception as e:
-            print(f"Error answering callback in test: {e}")
-
 
     async def main_test():
         reader = None # Initialize reader to None
         try:
             # Pass both handlers to the constructor
-            reader = TelegramReader(config, test_message_handler, test_confirmation_handler)
+            reader = TelegramReader(config, test_message_handler) # Removed confirmation handler
             success = await reader.start()
             if success:
                 print("Reader started successfully. Listening for events... Press Ctrl+C to stop.")

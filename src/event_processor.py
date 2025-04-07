@@ -578,7 +578,7 @@ async def process_update(analysis_result: dict, event, state_manager: StateManag
         logger.debug(f"{log_prefix} Checking if update should be applied: is_update_attempt={is_update_attempt}, target_trade_info_exists={target_trade_info is not None}, update_data_obj_exists={update_data_obj is not None}")
         if is_update_attempt and target_trade_info and update_data_obj: # Check for update_data_obj
             update_type = update_data_obj.update_type # Access attribute
-            logger.info(f"{log_prefix} Identified update type '{update_type}' for ticket {target_trade_info['ticket']}")
+            logger.info(f"{log_prefix} Identified update type '{update_type}' for ticket {target_trade_info.ticket}")
 
             CommandClass = get_command(update_type)
             if CommandClass:
@@ -597,7 +597,7 @@ async def process_update(analysis_result: dict, event, state_manager: StateManag
                 except Exception as cmd_exec_err:
                     logger.error(f"{log_prefix} Error executing update command {CommandClass.__name__}: {cmd_exec_err}", exc_info=True)
                     # Send generic failure message
-                    status_message_err = f"❌ <b>Update FAILED</b> <code>[MsgID: {message_id}]</code> (Ticket: <code>{target_trade_info['ticket']}</code>). Internal error during update execution. Check logs."
+                    status_message_err = f"❌ <b>Update FAILED</b> <code>[MsgID: {message_id}]</code> (Ticket: <code>{target_trade_info.ticket}</code>). Internal error during update execution. Check logs."
                     await telegram_sender.send_message(status_message_err, parse_mode='html')
                     if debug_channel_id:
                          await telegram_sender.send_message(f"🆘 {log_prefix} Error executing update command: {cmd_exec_err}", target_chat_id=debug_channel_id)
@@ -605,7 +605,7 @@ async def process_update(analysis_result: dict, event, state_manager: StateManag
             else:
                 # This case should ideally not happen if get_command defaults to UnknownUpdateCommand
                 logger.error(f"{log_prefix} Could not find command class for update type '{update_type}'.")
-                status_message_err = f"❓ <b>Update Unclear</b> <code>[MsgID: {message_id}]</code> (Ticket: <code>{target_trade_info['ticket']}</code>). Internal error: Unknown update type '{update_type}'."
+                status_message_err = f"❓ <b>Update Unclear</b> <code>[MsgID: {message_id}]</code> (Ticket: <code>{target_trade_info.ticket}</code>). Internal error: Unknown update type '{update_type}'."
                 await telegram_sender.send_message(status_message_err, parse_mode='html')
 
 

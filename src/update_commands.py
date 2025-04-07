@@ -105,11 +105,14 @@ class CloseTradeCommand(UpdateCommand):
     async def execute(self):
         action_description = "Close Trade"
         logger.info(f"{self.log_prefix} Attempting to close trade for ticket {self.ticket_to_update}")
-        # TODO: Handle partial close volume/percentage if provided in update_data
-        # close_vol = self.update_data.get('close_volume', 'N/A')
-        # close_perc = self.update_data.get('close_percentage', 'N/A')
         # For now, assumes full close
         success = self.mt5_executor.close_position(ticket=self.ticket_to_update)
+        if not success:
+            # Check if position is already closed
+            pos_info = mt5.positions_get(ticket=self.ticket_to_update)
+            if not pos_info or len(pos_info) == 0:
+                logger.info(f"{self.log_prefix} Position {self.ticket_to_update} already closed.")
+                success = True
         await self._send_status_message(action_description, success)
         mod_success = self.mt5_executor.close_position(self.ticket_to_update) # Close full position
         await self._send_status_message(action_description, mod_success)

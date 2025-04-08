@@ -475,7 +475,7 @@ async def run_bot():
     config_reload_interval = 30 # Check every 30 seconds (could be made configurable)
     config_reloader_task = asyncio.create_task(config_reloader_task_func(config_reload_interval), name="ConfigReloaderTask")
     trade_closure_monitor_task = asyncio.create_task(
-        periodic_trade_closure_monitor_task(state_manager, telegram_sender, interval_seconds=monitor_interval),
+        periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt5_executor, interval_seconds=monitor_interval),
         name="TradeClosureMonitorTask"
     )
 

@@ -7,7 +7,7 @@ logger = logging.getLogger('TradeBot')
 
 closed_trades_log = []
 
-async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, interval_seconds=60):
+async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt5_executor, interval_seconds=60):
     """
     Periodically checks for closed or canceled trades and sends status updates.
     """
@@ -135,6 +135,28 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, in
                 })
     
                 # Remove from active trades
+                # --- Cancel remaining distributed orders if TP hit ---
+                if close_reason == "Take Profit" and trade.sequence_info and trade.sequence_info.startswith("Dist"):
+                    logger.info(f"TP hit for distributed trade {ticket}. Canceling remaining pending orders for OrigMsgID {original_msg_id}...")
+                    canceled_count = 0
+                    # Iterate over a copy for safe removal
+                    for other_trade in list(state_manager.get_active_trades()):
+                        if other_trade.original_msg_id == original_msg_id and other_trade.is_pending and other_trade.ticket != ticket:
+                            logger.info(f"Attempting to cancel pending order {other_trade.ticket} from distributed set...")
+                            cancel_success = mt5_executor.delete_pending_order(other_trade.ticket)
+                            if cancel_success:
+                                canceled_count += 1
+                                # Remove from state manager immediately after successful cancellation
+                                state_manager.bot_active_trades = [t for t in state_manager.bot_active_trades if t.ticket != other_trade.ticket]
+                                logger.info(f"Successfully canceled pending order {other_trade.ticket} and removed from state.")
+                            else:
+                                logger.error(f"Failed to cancel pending order {other_trade.ticket}.")
+                    if canceled_count > 0:
+                        cancel_msg = f"ℹ️ Canceled {canceled_count} remaining pending order(s) for OrigMsgID {original_msg_id} due to TP hit on ticket {ticket}."
+                        await telegram_sender.send_message(cancel_msg, parse_mode='html')
+                # --- End Cancel Logic ---
+
+                # Remove the closed trade from active trades
                 state_manager.bot_active_trades = [t for t in state_manager.bot_active_trades if t.ticket != ticket]
 
         except asyncio.CancelledError:

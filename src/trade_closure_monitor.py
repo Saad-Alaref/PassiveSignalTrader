@@ -35,10 +35,11 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
 
                 # Trade is closed or canceled
                 logger.info(f"[ClosureMonitor] Tracked ticket {ticket} no longer active. Fetching history...")
-                profit = 0.0
+                # Initialize details to None, indicating they are unknown until found
+                profit = None # Initialize profit as None too
                 close_price = None
                 close_time = None
-                close_reason = "Unknown"
+                close_reason = None # Use None initially
                 is_canceled_pending = False
 
                 # --- Check Order History First for Cancellation ---
@@ -83,24 +84,38 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                 # --- If not canceled, fetch deal history for closure details ---
                 logger.debug(f"[ClosureMonitor] Ticket {ticket} not canceled or order history missing. Fetching deal history...")
                 # Fetch deals for close price and time
-                deals = mt5.history_deals_get(ticket=ticket) # Fetch specific deals by order ticket
+                # Fetch deals using the POSITION ID (which is the trade.ticket for filled orders)
+                deals = mt5.history_deals_get(position=ticket)
+
+                closing_deal = None
                 if deals:
+                    # Try to find the deal that closed the position (entry=OUT)
+                    # Note: Partial closes are also entry=OUT. We need the one that matches the position closure.
+                    # The most reliable way is often the latest deal associated with the position.
                     closing_deal = max(deals, key=lambda d: d.time)
-                    profit = closing_deal.profit
+                    logger.info(f"[ClosureMonitor] Found latest deal for position {ticket}: Deal {closing_deal.ticket} (Entry: {closing_deal.entry}, Reason: {closing_deal.reason})")
+
+                    profit = closing_deal.profit # Profit is directly from the deal
                     close_price = closing_deal.price
                     close_time = datetime.fromtimestamp(closing_deal.time, tz=timezone.utc)
-    
+
                     # Determine reason based on the closing deal's reason code
                     reason_code = closing_deal.reason
                     if reason_code == mt5.DEAL_REASON_TP:
                         close_reason = "Take Profit"
                     elif reason_code == mt5.DEAL_REASON_SL:
-                        if profit == 0:
-                            close_reason = "Break Even"
-                        elif profit > 0:
-                            close_reason = "Trailing Stop Loss"
-                        else:
-                            close_reason = "Stop Loss"
+                         # Check profit to distinguish BE/TSL/SL
+                         # Note: This might not be perfectly accurate if SL was moved manually near BE
+                         if abs(profit) < 0.01: # Consider near-zero profit as BE
+                              close_reason = "Break Even"
+                         # Check if SL price matches entry price (more reliable BE check?) - Requires trade_info access
+                         elif trade.entry_price is not None and closing_deal.price == trade.entry_price:
+                              close_reason = "Break Even"
+                         # Check if TSL was active (requires state) - Requires trade_info access
+                         elif trade.tsl_active and profit > 0: # If TSL was active and profit positive -> TSL
+                              close_reason = "Trailing Stop Loss"
+                         else: # Otherwise, assume regular SL
+                              close_reason = "Stop Loss"
                     elif reason_code == mt5.DEAL_REASON_SO:
                         close_reason = "Stop Out"
                     elif reason_code == mt5.DEAL_REASON_MOBILE:
@@ -111,20 +126,27 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                         close_reason = "Manual Close (Desktop)"
                     elif reason_code == mt5.DEAL_REASON_EXPERT:
                         close_reason = "Expert Advisor"
+                    # Add check for DEAL_REASON_CLOSE (if applicable, might be broker specific)
+                    # elif reason_code == mt5.DEAL_REASON_CLOSE:
+                    #     close_reason = "Closed by Broker/System"
                     else:
-                        close_reason = f"Other ({reason_code})"
-    
-                else: # No closing deal found
-                    logger.warning(f"[ClosureMonitor] No closing deal found for ticket {ticket}. Reason remains '{close_reason}'.")
-                    # Attempt to get close time from order history if not already set (e.g., from cancellation check)
+                        close_reason = f"Closed (Reason Code: {reason_code})" # More generic fallback
+                    logger.info(f"[ClosureMonitor] Determined close reason for position {ticket}: {close_reason}")
+
+                else: # No deals found for this position ID
+                    logger.warning(f"[ClosureMonitor] No deal history found for closed position {ticket}.")
+                    # Try to get close time from order history if available
                     if close_time is None and orders: # Use orders fetched earlier
                          orders_sorted = sorted(orders, key=lambda o: o.time_done, reverse=True)
                          last_order_state = orders_sorted[0]
+                         # Use order time only if it seems valid (e.g., state is FILLED?)
                          close_time = datetime.fromtimestamp(last_order_state.time_done, tz=timezone.utc)
+                         close_reason = "Closed (No Deal Info)" # Set reason if no deal found
                          logger.info(f"[ClosureMonitor] Using order time_done {close_time} as close time for ticket {ticket}.")
-                    elif close_time is None:
-                         close_time = datetime.now(timezone.utc) # Fallback close time
-                         logger.warning(f"[ClosureMonitor] Could not determine close time for ticket {ticket}. Using current time.")
+                    # If time is still None, it will be handled during message formatting
+                    # Profit and Close Price remain None if no deal found
+                    # Ensure profit is None if no deal was found
+                    profit = None
 
 
                 # --- Compose Closed Trade Message ---
@@ -145,31 +167,41 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
 
                 # Use HTML escaping for safety, especially for reason
                 import html
-                safe_reason = html.escape(str(close_reason))
-                entry_price_display = f"<code>{trade.entry_price}</code>" if trade.entry_price is not None else "<i>N/A</i>"
+                safe_reason = html.escape(str(close_reason)) if close_reason else None # Escape if reason exists
+
+                # Format final values for message, using "N/A" if None
+                profit_display = f"<code>{profit:.2f}</code>" if profit is not None else "<i>N/A</i>" # Check if profit was found
                 close_price_display = f"<code>{close_price}</code>" if close_price is not None else "<i>N/A</i>"
-                close_time_display = close_time.strftime('%Y-%m-%d %H:%M:%S') if close_time else "<i>N/A</i>"
+                reason_display = safe_reason if safe_reason else "<i>Unknown</i>"
+                close_time_display = close_time.strftime('%Y-%m-%d %H:%M:%S %Z') if close_time else "<i>N/A</i>" # Added TZ
+                pips_display = f"<code>{pips:.1f}</code>" if close_price is not None and trade.entry_price is not None else "<i>N/A</i>" # Pips require prices
+                entry_price_display = f"<code>{trade.entry_price}</code>" if trade.entry_price is not None else "<i>N/A</i>"
 
                 msg = f"📉 <b>Trade Closed</b>\n"
                 msg += f"<b>Ticket:</b> <code>{ticket}</code>\n"
                 msg += f"<b>Symbol:</b> <code>{trade.symbol}</code>\n"
                 msg += f"<b>Entry Price:</b> {entry_price_display}\n"
                 msg += f"<b>Close Price:</b> {close_price_display}\n"
-                msg += f"<b>Profit:</b> <code>{profit:.2f}</code>\n"
-                msg += f"<b>Pips:</b> <code>{pips:.1f}</code>\n"
-                msg += f"<b>Reason:</b> {safe_reason}\n"
+                msg += f"<b>Profit:</b> {profit_display}\n"
+                msg += f"<b>Pips:</b> {pips_display}\n"
+                msg += f"<b>Reason:</b> {reason_display}\n"
                 msg += f"<b>Closed At:</b> {close_time_display}\n"
 
                 original_msg_id = getattr(trade, 'original_msg_id', None)
                 await telegram_sender.send_message(msg, parse_mode='html', reply_to=original_msg_id)
 
                 # Log for daily summary
+                # Log for daily summary, storing None if unknown
+                # Log for daily summary, storing None if unknown
+                # Log for daily summary, storing None if unknown
+                # Log for daily summary, storing None if unknown
+                # Log for daily summary, storing None if unknown
                 closed_trades_log.append({
                     'ticket': ticket,
                     'symbol': trade.symbol,
-                    'profit': profit,
-                    'close_time': close_time, # Log the datetime object
-                    'reason': close_reason # Log the original reason string
+                    'profit': profit, # Log the float value or None
+                    'close_time': close_time, # Log the datetime object or None
+                    'reason': close_reason if close_reason is not None else "Unknown" # Log reason or Unknown
                 })
                 # --- End Compose Closed Trade Message ---
 

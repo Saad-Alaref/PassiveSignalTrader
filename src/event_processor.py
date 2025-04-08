@@ -525,7 +525,7 @@ async def process_update(analysis_result: dict, event, state_manager: StateManag
                 target_trade_info = relevant_trades[0] # Target is the latest relevant trade
                 logger.info(f"{log_prefix} Identified latest trade (Ticket: {target_trade_info.ticket}, OrigMsgID: {target_trade_info.original_msg_id}) as potential target for 'update' type message.")
                 update_data_obj = analysis_result.get('data') # Use data (which is UpdateData obj) from initial analysis
-                logger.debug(f"{log_prefix} Using update_data from initial analysis: {update_data}")
+                logger.debug(f"{log_prefix} Using update_data_obj from initial analysis: {update_data_obj}")
             else:
                 logger.info(f"{log_prefix} No active trades found matching criteria for update.")
                 status_message = f"⚠️ <b>Update Ignored</b> <code>[MsgID: {message_id}]</code> - No matching active trade found."
@@ -555,7 +555,7 @@ async def process_update(analysis_result: dict, event, state_manager: StateManag
 
                 if update_analysis_result and update_analysis_result.get('type') == 'update' and update_analysis_result.get('data'):
                     update_data_obj = update_analysis_result.get('data') # Get the UpdateData object
-                    logger.debug(f"{log_prefix} Using update_data from edit/reply re-analysis: {update_data}")
+                    logger.debug(f"{log_prefix} Using update_data_obj from edit/reply re-analysis: {update_data_obj}")
                     # Allow LLM to override target based on index if provided in update analysis
                     target_index_edit = update_data_obj.target_trade_index # Access attribute
                     if target_index_edit is not None:

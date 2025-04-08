@@ -211,14 +211,15 @@ class SignalAnalyzer:
                      return {'type': 'ignore', 'data': None}
                 validated_tps = []
                 for tp in tp_list:
-                    if tp == "N/A" or tp is None:
-                        validated_tps.append("N/A")
+                    # Allow "N/A", None, or "OPEN" (case-insensitive) as non-numeric TPs
+                    if tp == "N/A" or tp is None or (isinstance(tp, str) and tp.upper() == "OPEN"):
+                        validated_tps.append("N/A") # Standardize non-numeric TPs to "N/A"
                     else:
                         try:
                             validated_tps.append(float(tp))
                         except (ValueError, TypeError):
-                            logger.error(f"LLM new_signal result contains invalid numeric TP value '{tp}' in list. Result: {llm_result}")
-                            return {'type': 'ignore', 'data': None}
+                            logger.error(f"LLM new_signal result contains invalid numeric TP value '{tp}' in list (and not 'OPEN'). Result: {llm_result}")
+                            return {'type': 'ignore', 'data': None} # Ignore if it's not numeric and not 'OPEN'/'N/A'
 
                 # Validate final entry price if it's supposed to be numeric
                 final_entry_price_for_obj = entry_price_final

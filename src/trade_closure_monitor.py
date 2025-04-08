@@ -159,11 +159,11 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                         digits = symbol_info.digits
                 except:
                     pass
-                pips = 0.0
+                points = 0.0 # Renamed from pips
                 if close_price and trade.entry_price:
-                    pips = (close_price - trade.entry_price) * (10 ** digits)
+                    points = (close_price - trade.entry_price) * (10 ** digits) # This calculates points
                     if trade_type == mt5.ORDER_TYPE_SELL:
-                        pips = -pips
+                        points = -points
 
                 # Use HTML escaping for safety, especially for reason
                 import html
@@ -174,7 +174,7 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                 close_price_display = f"<code>{close_price}</code>" if close_price is not None else "<i>N/A</i>"
                 reason_display = safe_reason if safe_reason else "<i>Unknown</i>"
                 close_time_display = close_time.strftime('%Y-%m-%d %H:%M:%S %Z') if close_time else "<i>N/A</i>" # Added TZ
-                pips_display = f"<code>{pips:.1f}</code>" if close_price is not None and trade.entry_price is not None else "<i>N/A</i>" # Pips require prices
+                points_display = f"<code>{points:.1f}</code>" if close_price is not None and trade.entry_price is not None else "<i>N/A</i>" # Renamed from pips_display, uses points variable
                 entry_price_display = f"<code>{trade.entry_price}</code>" if trade.entry_price is not None else "<i>N/A</i>"
 
                 msg = f"📉 <b>Trade Closed</b>\n"
@@ -183,7 +183,7 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                 msg += f"<b>Entry Price:</b> {entry_price_display}\n"
                 msg += f"<b>Close Price:</b> {close_price_display}\n"
                 msg += f"<b>Profit:</b> {profit_display}\n"
-                msg += f"<b>Pips:</b> {pips_display}\n"
+                msg += f"<b>Points:</b> {points_display}\n" # Changed label from Pips to Points
                 msg += f"<b>Reason:</b> {reason_display}\n"
                 msg += f"<b>Closed At:</b> {close_time_display}\n"
 

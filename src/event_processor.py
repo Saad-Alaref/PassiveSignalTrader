@@ -498,12 +498,13 @@ async def process_update(analysis_result: dict, event, state_manager: StateManag
     message_text = getattr(event, 'text', '')
     is_edit = isinstance(event, events.MessageEdited.Event) # Assuming events is imported
     reply_to_msg_id = getattr(event, 'reply_to_msg_id', None)
+    update_data_obj = None # Initialize update_data_obj
 
     try:
         logger.debug(f"{log_prefix} Entering process_update. Analysis result type: {analysis_result.get('type') if analysis_result else 'N/A'}, Is Edit: {is_edit}, ReplyTo: {reply_to_msg_id}")
         target_trade_info = None
         is_update_attempt = False
-        update_data = None # Holds the dict with update details
+        # update_data = None # Holds the dict with update details - Replaced by update_data_obj
 
         # Case A: New message classified as 'update' by initial analysis
         if analysis_result and analysis_result.get('type') == 'update':
@@ -545,7 +546,8 @@ async def process_update(analysis_result: dict, event, state_manager: StateManag
             target_trade_info = state_manager.get_trade_by_original_msg_id(original_msg_id) if state_manager else None
 
             if target_trade_info:
-                logger.info(f"{log_prefix} Found tracked trade (Ticket: {target_trade_info.get('ticket')}, OrigMsgID: {target_trade_info.get('original_msg_id')}) linked to original message {original_msg_id}.")
+                # Use attribute access for TradeInfo object
+                logger.info(f"{log_prefix} Found tracked trade (Ticket: {target_trade_info.ticket}, OrigMsgID: {target_trade_info.original_msg_id}) linked to original message {original_msg_id}.")
                 # Analyze the *edit/reply* text to get update details
                 logger.info(f"{log_prefix} Re-analyzing edit/reply text for update details...")
                 update_analysis_result = signal_analyzer.analyze(message_text, image_data, llm_context) # Re-analyze edit/reply text
@@ -561,8 +563,9 @@ async def process_update(analysis_result: dict, event, state_manager: StateManag
                              list_index_edit = int(target_index_edit) - 1
                              active_trades_list = state_manager.get_active_trades() if state_manager else []
                              if 0 <= list_index_edit < len(active_trades_list):
-                                 target_trade_info = active_trades_list[list_index_edit] # Override target
-                                 logger.info(f"{log_prefix} Overrode target trade for edit/reply using LLM index {target_index_edit} -> Ticket: {target_trade_info.get('ticket')}")
+                                target_trade_info = active_trades_list[list_index_edit] # Override target
+                                # Use attribute access for TradeInfo object
+                                logger.info(f"{log_prefix} Overrode target trade for edit/reply using LLM index {target_index_edit} -> Ticket: {target_trade_info.ticket}")
                              else:
                                  logger.warning(f"{log_prefix} LLM provided invalid target_trade_index for edit/reply: {target_index_edit}.")
                          except (ValueError, TypeError):

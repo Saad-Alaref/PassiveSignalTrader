@@ -23,6 +23,49 @@ from .mt5_data_fetcher import MT5DataFetcher # Import MT5DataFetcher
 logger = logging.getLogger('TradeBot')
 
 class TelegramSender:
+
+    @staticmethod
+    def format_confirmation_message(trade_params, confirmation_id, timeout_minutes, initial_market_price=None, current_price_str="<i>N/A</i>"):
+        """
+        Generates a formatted Telegram confirmation message.
+
+        Args:
+            trade_params (dict): Trade parameters including action, symbol, volume, sl, tp, original_signal_msg_id.
+            confirmation_id (str): Unique confirmation ID.
+            timeout_minutes (int): Expiry time in minutes.
+            initial_market_price (float, optional): Initial market price at confirmation request.
+            current_price_str (str, optional): Current price string to display.
+
+        Returns:
+            str: Formatted HTML message.
+        """
+        action = trade_params.get('action', 'N/A')
+        symbol = trade_params.get('symbol', 'N/A')
+        volume = trade_params.get('volume', 'N/A')
+        sl = trade_params.get('sl')
+        tp = trade_params.get('tp')
+        original_msg_id = trade_params.get('original_signal_msg_id', 'N/A')
+
+        sl_str = f"<code>{sl}</code>" if sl is not None else "<i>None</i>"
+        tp_str = f"<code>{tp}</code>" if tp is not None else "<i>None</i>"
+
+        # Initial price display
+        initial_price_display = "<i>N/A</i>"
+        if initial_market_price is not None:
+            initial_price_display = f"Ask:<code>{initial_market_price}</code>" if action == "BUY" else f"Bid:<code>{initial_market_price}</code>"
+
+        message = f"""❓ <b>Confirm Market Trade?</b> <code>[MsgID: {original_msg_id}]</code>
+
+<b>Action:</b> <code>{action}</code>
+<b>Symbol:</b> <code>{symbol}</code>
+<b>Volume:</b> <code>{volume}</code>
+<b>SL:</b> {sl_str} | <b>TP:</b> {tp_str}
+<b>Signal Price:</b> {initial_price_display}
+<b>Current Price:</b> {current_price_str}
+
+<i>This confirmation expires in {timeout_minutes} minutes.</i>"""
+
+        return message
     """
     Handles connection to Telegram as a BOT account, sends messages,
     and now also handles callback queries from its own messages.
@@ -312,6 +355,39 @@ class TelegramSender:
             except Exception as fallback_e:
                 logger.error(f"Failed to send plain text fallback confirmation message (ID: {confirmation_id}): {fallback_e}", exc_info=True)
                 return None
+    async def edit_message(self, chat_id, message_id, new_text, parse_mode='html', buttons=None):
+        """Edits an existing message sent by the bot, optionally preserving buttons."""
+        if not self.client or not self.client.is_connected():
+            logger.error(f"Cannot edit message {message_id}, Telegram Sender client not connected.")
+            return False
+
+        if not chat_id or not message_id:
+            logger.error(f"Cannot edit message: Invalid chat_id ({chat_id}) or message_id ({message_id}).")
+            return False
+
+        try:
+            # Note: Editing might remove inline buttons if 'buttons=None' is not explicitly passed
+            # or if the library defaults to removing them. Check Telethon docs if buttons disappear.
+            # Pass buttons to preserve them
+            await self.client.edit_message(entity=chat_id, message=message_id, text=new_text, parse_mode=parse_mode, buttons=buttons)
+            logger.debug(f"Successfully edited message {message_id} in chat {chat_id}.")
+            return True
+        except MessageNotModifiedError:
+             logger.debug(f"Message {message_id} not modified (content likely the same).")
+             return True # Not an error if content is the same
+        except MessageIdInvalidError:
+             logger.error(f"Failed to edit message: Message ID {message_id} is invalid or deleted.")
+             # Attempt to remove potentially stale confirmation from state if edit fails due to invalid ID?
+             # This requires finding the confirmation_id associated with this message_id. Complex.
+             return False
+        except FloodWaitError as fwe:
+            logger.error(f"Flood wait error when editing message {message_id}: waiting {fwe.seconds} seconds.")
+            # Don't wait here in the edit function, let the calling task handle delays if needed.
+            return False
+        except Exception as e:
+            logger.error(f"Failed to edit message {message_id} in chat {chat_id}: {e}", exc_info=True)
+            return False
+
 
     # --- Internal Callback Query Handler ---
     async def _handle_callback_query(self, event: events.CallbackQuery.Event):

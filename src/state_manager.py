@@ -1,6 +1,6 @@
 import logging
 import MetaTrader5 as mt5
-from typing import Union
+from typing import Union, Optional
 from collections import deque, defaultdict # Keep deque, defaultdict might be useful later
 from datetime import datetime, timezone, timedelta # Keep only this one
 from telethon import events
@@ -21,18 +21,6 @@ class StateManager:
         """
         self.config_service = config_service_instance # Store service instance
         # List to store details of trades initiated by the bot.
-        # Each entry example:
-        # {
-        #  'ticket': 12345, 'symbol': 'XAUUSD', 'open_time': datetime,
-        #  'original_msg_id': 50, 'entry_price': 1900.50, 'initial_sl': 1895.0,
-        #  'original_volume': 0.02, # Added
-        #  'all_tps': [1910.0, 1920.0, "N/A"], # List of TPs from signal
-        #  'tp_strategy': 'sequential_partial_close', # Strategy from config
-        #  'next_tp_index': 0, # Index of the *next* TP in all_tps to monitor (starts at 0) - Added
-        #  'auto_sl_pending_timestamp': datetime|None,
-        #  'auto_tp_applied': bool, # Added flag for AutoTP
-        #  'tsl_active': bool # Added flag for Trailing Stop activation
-        # }
         self.bot_active_trades = []
         # Deque for message history - Max size read at init, not easily hot-reloadable
         self.history_message_count = self.config_service.getint('LLMContext', 'history_message_count', fallback=10) # Use service
@@ -40,12 +28,41 @@ class StateManager:
         self.last_market_execution_time = None # Timestamp of the last market order execution
         self.last_market_execution_time = None # Timestamp of the last market order execution
 
+        # Store closed trades log for summaries
+        self.closed_trades_log = []
+
         # --- New: Store pending trade confirmations ---
-        # Structure: { confirmation_id: {'trade_details': {...}, 'timestamp': datetime, 'message_id': int} }
+        # Structure: { confirmation_id: {'trade_details': {...}, 'timestamp': datetime, 'message_id': int, 'chat_id': int, 'initial_market_price': float | None} }
         self.pending_confirmations = {}
         # --- End New ---
 
         logger.info(f"StateManager initialized. History size: {self.history_message_count}")
+
+    def record_closed_trade(self, trade_dict):
+        """
+        Records a closed or canceled trade for daily summary.
+
+        Args:
+            trade_dict (dict): Dictionary with keys like 'ticket', 'symbol', 'profit', 'close_time', 'reason'.
+        """
+        self.closed_trades_log.append(trade_dict)
+        logger.debug(f"Recorded closed trade: {trade_dict}")
+
+    def get_closed_trades_log(self):
+        """
+        Returns the list of recorded closed trades.
+
+        Returns:
+            list: List of closed trade dictionaries.
+        """
+        return self.closed_trades_log
+
+    def clear_closed_trades_log(self):
+        """
+        Clears the closed trades log (e.g., after daily summary sent).
+        """
+        self.closed_trades_log.clear()
+        logger.debug("Cleared closed trades log after summary.")
 
     # --- Active Trade Management ---
 
@@ -201,7 +218,7 @@ class StateManager:
 
     # --- New: Pending Confirmation Management ---
 
-    def add_pending_confirmation(self, confirmation_id: str, trade_details: dict, message_id: int, timestamp: datetime):
+    def add_pending_confirmation(self, confirmation_id: str, trade_details: dict, message_id: int, chat_id: int, timestamp: datetime, initial_market_price: Optional[float]):
         """
         Stores details of a trade awaiting user confirmation via Telegram buttons.
 
@@ -209,7 +226,9 @@ class StateManager:
             confirmation_id (str): The unique ID for this confirmation request.
             trade_details (dict): The dictionary containing all necessary parameters for mt5_executor.execute_trade.
             message_id (int): The ID of the Telegram message sent with the confirmation buttons.
+            chat_id (int): The ID of the chat where the confirmation message was sent.
             timestamp (datetime): The time when the confirmation request was initiated.
+            initial_market_price (Optional[float]): The market price at the time the confirmation was requested.
         """
         if confirmation_id in self.pending_confirmations:
             logger.warning(f"Attempted to add duplicate pending confirmation ID: {confirmation_id}")
@@ -217,9 +236,11 @@ class StateManager:
         self.pending_confirmations[confirmation_id] = {
             'trade_details': trade_details,
             'timestamp': timestamp,
-            'message_id': message_id
+            'message_id': message_id,
+            'chat_id': chat_id, # Store chat_id
+            'initial_market_price': initial_market_price # Store initial price
         }
-        logger.info(f"Added pending confirmation: ID={confirmation_id}, MsgID={message_id}")
+        logger.info(f"Added pending confirmation: ID={confirmation_id}, MsgID={message_id}, InitialPrice={initial_market_price}")
         logger.debug(f"Pending confirmation details for {confirmation_id}: {trade_details}")
 
     def get_pending_confirmation(self, confirmation_id: str) -> Union[dict, None]:
@@ -256,6 +277,11 @@ class StateManager:
         else:
             logger.warning(f"Attempted to remove non-existent pending confirmation ID: {confirmation_id}")
             return False
+
+    def get_active_confirmations(self) -> dict:
+        """Returns the dictionary of active pending confirmations."""
+        # Return a copy to prevent modification during iteration
+        return self.pending_confirmations.copy()
 
     # --- End New ---
 

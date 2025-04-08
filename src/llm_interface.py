@@ -93,8 +93,9 @@ class LLMInterface:
 
         # --- Get Prompts from Config ---
         base_instructions_template = self.config_service.get('LLMPrompts', 'base_instructions', fallback="ERROR: base_instructions not found in config") # Use service
-        analyze_signal_instructions = self.config_service.get('LLMPrompts', 'analyze_signal_instructions', fallback="ERROR: analyze_signal_instructions not found in config") # Use service
-        analyze_edit_or_reply_instructions = self.config_service.get('LLMPrompts', 'analyze_edit_or_reply_instructions', fallback="ERROR: analyze_edit_or_reply_instructions not found in config") # Use service
+        analyze_signal_instructions = self.config_service.get('LLMPrompts', 'analyze_signal_instructions', fallback="ERROR: analyze_signal_instructions not found in config")
+        # analyze_edit_or_reply_instructions = self.config_service.get('LLMPrompts', 'analyze_edit_or_reply_instructions', fallback="ERROR: analyze_edit_or_reply_instructions not found in config") # Deprecated
+        analyze_edit_update_instructions = self.config_service.get('LLMPrompts', 'analyze_edit_update_instructions', fallback="ERROR: analyze_edit_update_instructions not found in config") # New prompt for edits
 
         # --- Format Base Prompt ---
         # Use .format() for safe insertion of potentially complex context/message strings
@@ -102,16 +103,15 @@ class LLMInterface:
 
         if prompt_type == "analyze_signal":
             prompt = base_instructions + "\n" + analyze_signal_instructions
-        # Keep analyze_edit_or_reply prompt separate for now, might merge later if needed
-        elif prompt_type == "analyze_edit_or_reply":
-             # Instructions for analyzing edits/replies for missing info
-             # This prompt type might become less necessary with the main prompt's context,
-             # but we keep it for now. Add context instructions here too if needed.
-             prompt = base_instructions + "\n" + analyze_edit_or_reply_instructions
+        elif prompt_type == "analyze_edit_update":
+             # Instructions specifically for extracting update parameters from an edited signal message
+             prompt = base_instructions + "\n" + analyze_edit_update_instructions
+        # elif prompt_type == "analyze_edit_or_reply": # Deprecated prompt type
+        #      prompt = base_instructions + "\n" + analyze_edit_or_reply_instructions
         else:
-            logger.warning(f"Unknown prompt type requested: {prompt_type}")
-            # Fallback to a generic analysis prompt or return error
-            prompt = base_instructions + "\nAnalyze the message for trading relevance."
+            logger.warning(f"Unknown prompt type requested: {prompt_type}. Using default analyze_signal.")
+            # Fallback to the main analysis prompt
+            prompt = base_instructions + "\n" + analyze_signal_instructions
 
         return prompt.strip()
 
@@ -124,7 +124,7 @@ class LLMInterface:
             message_text (str): The text content of the Telegram message.
             image_data (bytes, optional): The byte content of an image, if present. Defaults to None.
             context (dict, optional): Additional context (price, history, trades). Defaults to None.
-            prompt_type (str): The type of analysis requested ("analyze_signal", "analyze_edit_or_reply").
+            prompt_type (str): The type of analysis requested ("analyze_signal", "analyze_edit_update").
 
         Returns:
             dict or None: A dictionary containing the structured analysis results from the LLM,

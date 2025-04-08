@@ -27,9 +27,10 @@ class SignalData:
 @dataclass
 class UpdateData:
     """Represents the structured data extracted for a trade update."""
-    update_type: str = "unknown" # "modify_sltp", "move_sl", "set_be", "close_trade", etc.
+    update_type: str = "unknown" # "modify_sltp", "modify_entry", "move_sl", "set_be", "close_trade", "partial_close", "cancel_pending" etc.
     symbol: Optional[SymbolType] = None # Hint for finding the trade
     target_trade_index: Optional[int] = None # Optional index from LLM context
+    new_entry_price: Optional[PriceType] = "N/A" # float, range string, or "N/A"
     new_stop_loss: Optional[PriceType] = "N/A" # float or "N/A"
     new_take_profits: List[PriceType] = field(default_factory=lambda: ["N/A"]) # List of floats or "N/A"
     close_volume: Optional[PriceType] = "N/A" # float or "N/A"

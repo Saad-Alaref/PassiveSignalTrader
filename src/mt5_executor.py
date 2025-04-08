@@ -503,11 +503,26 @@ class MT5Executor:
              return True
         # Optional: Check if moving SL to BE would violate distance rules (though SLTP action might handle this)
 
-        logger.info(f"Attempting to modify SL to Breakeven ({entry_price}) for position {ticket}")
+        # Fetch current spread
+        tick = mt5.symbol_info_tick(pos.symbol)
+        if tick is None:
+            logger.warning(f"Could not fetch tick data for {pos.symbol}, using entry price as BE SL without spread buffer.")
+            be_sl = entry_price
+        else:
+            spread = tick.ask - tick.bid
+            # Adjust SL to cover spread
+            if pos.type == mt5.ORDER_TYPE_BUY:
+                be_sl = entry_price + spread
+            elif pos.type == mt5.ORDER_TYPE_SELL:
+                be_sl = entry_price - spread
+            else:
+                be_sl = entry_price  # fallback
+
+        logger.info(f"Attempting to modify SL to Breakeven adjusted for spread ({be_sl}) for position {ticket}")
 
         # Use the existing modify_trade logic, passing only the new SL
         # Important: modify_trade handles both positions and orders, so this is safe
-        return self.modify_trade(ticket=ticket, sl=entry_price) # TP will be kept as is (None means no change)
+        return self.modify_trade(ticket=ticket, sl=be_sl) # TP will be kept as is (None means no change)
 
 
     def delete_pending_order(self, ticket, comment="TradeBot Cancel"):
@@ -575,6 +590,74 @@ class MT5Executor:
               logger.error(f"Exception during pending order deletion for ticket {ticket}: {e}", exc_info=True)
               return False
 
+    def modify_pending_order_price(self, ticket, new_price, comment="TradeBot Modify Entry"):
+         """
+         Modifies the entry price of an existing pending order.
+
+         Args:
+             ticket (int): The ticket number of the pending order.
+             new_price (float): The new entry price.
+             comment (str, optional): Comment for the modification request.
+
+         Returns:
+             bool: True if modification request was sent successfully and accepted, False otherwise.
+         """
+         if not self.connector.ensure_connection():
+             logger.error(f"Cannot modify pending order {ticket} price, MT5 connection failed.")
+             return False
+
+         # Verify it's a pending order first
+         order_info = mt5.orders_get(ticket=ticket)
+         if not order_info or len(order_info) == 0:
+             logger.error(f"Cannot modify price: Ticket {ticket} not found or is not a pending order.")
+             return False
+
+         ord_info = order_info[0]
+         # Double check it's actually a pending order type
+         if ord_info.type not in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_SELL_LIMIT,
+                                  mt5.ORDER_TYPE_BUY_STOP, mt5.ORDER_TYPE_SELL_STOP,
+                                  mt5.ORDER_TYPE_BUY_STOP_LIMIT, mt5.ORDER_TYPE_SELL_STOP_LIMIT]:
+              logger.error(f"Ticket {ticket} exists but is not a modifiable pending order type (Type: {ord_info.type}).")
+              return False
+
+         logger.info(f"Attempting to modify entry price for pending order {ticket} to {new_price}")
+
+         request = {
+             "action": mt5.TRADE_ACTION_MODIFY,
+             "order": ticket,
+             "symbol": ord_info.symbol,
+             "price": float(new_price), # Set the new price
+             "sl": ord_info.sl, # Keep original SL
+             "tp": ord_info.tp, # Keep original TP
+             "type": ord_info.type,
+             "type_time": ord_info.type_time,
+             "type_filling": ord_info.type_filling,
+             "comment": comment,
+         }
+         # Add stoplimit price if it's a stoplimit order
+         if ord_info.type in (mt5.ORDER_TYPE_BUY_STOP_LIMIT, mt5.ORDER_TYPE_SELL_STOP_LIMIT):
+             request["stoplimit"] = ord_info.price_stoplimit # Keep original stoplimit price
+
+         # Send the modification request
+         try:
+             logger.debug(f"Sending TRADE_ACTION_MODIFY request for ticket {ticket} (price change): {request}")
+             result = mt5.order_send(request)
+
+             if result is None:
+                 logger.error(f"Pending order price modification failed for ticket {ticket}, error code: {mt5.last_error()}")
+                 return False
+
+             logger.info(f"Pending order price modification result for ticket {ticket}: retcode={result.retcode}, comment='{result.comment}'")
+
+             if result.retcode == mt5.TRADE_RETCODE_DONE:
+                 logger.info(f"Pending order price modification request for ticket {ticket} accepted.")
+                 return True
+             else:
+                 logger.error(f"Failed to modify pending order price for ticket {ticket}: {result.comment} (retcode={result.retcode})")
+                 return False
+         except Exception as e:
+              logger.error(f"Exception during pending order price modification for ticket {ticket}: {e}", exc_info=True)
+              return False
 
 # Example usage (optional, for testing)
 if __name__ == '__main__':

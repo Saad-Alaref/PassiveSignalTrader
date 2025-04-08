@@ -8,6 +8,7 @@ from telethon import events # For type hinting in handler
 from datetime import datetime, timezone, timedelta # For AutoSL timing
 import html # For escaping HTML in debug messages
 import json # For debug logging analysis results
+from typing import Optional # Added for type hinting
 
 # Import local modules
 from .state_manager import StateManager # Use relative import
@@ -26,8 +27,9 @@ from .telegram_reader import TelegramReader # Use relative import
 from .telegram_sender import TelegramSender # Use relative import
 from .trade_manager import TradeManager # Use relative import
 from . import event_processor # Use relative import
-from .trade_closure_monitor import periodic_trade_closure_monitor_task, closed_trades_log
+from .trade_closure_monitor import periodic_trade_closure_monitor_task
 from .daily_summary import daily_summary_task
+# from .confirmation_updater import confirmation_updater_task # Task defined below
 
 # --- Global Variables ---
 logger = None # Will be configured in main
@@ -35,35 +37,41 @@ logger = None # Will be configured in main
 config_file_path = 'config/config.ini' # Keep for potential direct path use if needed
 last_config_mtime = 0 # Track modification time
 # config_lock = asyncio.Lock() # Lock might not be needed if service handles internal state safely
-config_reloader_task = None # Task handle for the reloader
-periodic_monitor_task = None # Task handle for the periodic MT5 monitor
+config_reloader_task: Optional[asyncio.Task] = None # Task handle for the reloader
+periodic_monitor_task: Optional[asyncio.Task] = None # Task handle for the periodic MT5 monitor
+confirmation_update_task: Optional[asyncio.Task] = None # Task handle for confirmation message updates
+daily_summary_task_handle: Optional[asyncio.Task] = None # Task handle for daily summary
 
 # --- Core Components (Initialized in main) ---
-mt5_connector: MT5Connector = None
-mt5_fetcher: MT5DataFetcher = None
-llm_interface: LLMInterface = None
-signal_analyzer: SignalAnalyzer = None
-duplicate_checker: DuplicateChecker = None
-decision_logic: DecisionLogic = None
-trade_calculator: TradeCalculator = None
-mt5_executor: MT5Executor = None
-telegram_reader: TelegramReader = None
-telegram_sender: TelegramSender = None
-state_manager: StateManager = None
-trade_manager: TradeManager = None
+mt5_connector: Optional[MT5Connector] = None
+mt5_fetcher: Optional[MT5DataFetcher] = None
+llm_interface: Optional[LLMInterface] = None
+signal_analyzer: Optional[SignalAnalyzer] = None
+duplicate_checker: Optional[DuplicateChecker] = None
+decision_logic: Optional[DecisionLogic] = None
+trade_calculator: Optional[TradeCalculator] = None
+mt5_executor: Optional[MT5Executor] = None
+telegram_reader: Optional[TelegramReader] = None
+telegram_sender: Optional[TelegramSender] = None
+state_manager: Optional[StateManager] = None
+trade_manager: Optional[TradeManager] = None
 
 # --- Signal Handling for Graceful Shutdown ---
 def handle_shutdown_signal(sig, frame):
     """Initiates graceful shutdown when SIGINT or SIGTERM is received."""
-    global periodic_monitor_task, config_reloader_task # Use correct task names
+    global periodic_monitor_task, config_reloader_task, confirmation_update_task, daily_summary_task_handle # Added tasks
     logger.info(f"Received shutdown signal: {sig}. Initiating graceful shutdown...")
 
-    # Cancel the periodic monitor task first
+    # Cancel tasks
+    if daily_summary_task_handle and not daily_summary_task_handle.done():
+        logger.info("Signal handler: Cancelling daily summary task...")
+        daily_summary_task_handle.cancel()
+    if confirmation_update_task and not confirmation_update_task.done():
+        logger.info("Signal handler: Cancelling confirmation updater task...")
+        confirmation_update_task.cancel()
     if periodic_monitor_task and not periodic_monitor_task.done():
         logger.info("Signal handler: Cancelling periodic monitor task...")
         periodic_monitor_task.cancel()
-
-    # Cancel the config reloader task
     if config_reloader_task and not config_reloader_task.done():
         logger.info("Signal handler: Cancelling config reloader task...")
         config_reloader_task.cancel()
@@ -377,6 +385,121 @@ async def periodic_mt5_monitor_task(interval_seconds=60):
             error_sleep_interval = current_interval if 'current_interval' in locals() and current_interval > 0 else 60
             await asyncio.sleep(error_sleep_interval * 2)
 
+# --- Confirmation Message Updater Task ---
+async def confirmation_updater_task_func(interval_seconds=10):
+    """Periodically updates active confirmation messages with current market price."""
+    global state_manager, telegram_sender, mt5_fetcher, config_service, logger
+
+    if interval_seconds <= 0:
+        logger.info("Confirmation message update interval is zero or negative. Task disabled.")
+        return # Don't run the task if interval is invalid
+
+    logger.info(f"Starting confirmation message updater task (Interval: {interval_seconds}s).")
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+            if not state_manager or not telegram_sender or not mt5_fetcher:
+                logger.warning("[ConfUpdater] Core components not ready. Skipping update cycle.")
+                continue
+
+            active_confirmations = state_manager.get_active_confirmations()
+            if not active_confirmations:
+                # logger.debug("[ConfUpdater] No active confirmations to update.")
+                continue
+
+            logger.debug(f"[ConfUpdater] Checking {len(active_confirmations)} active confirmation(s)...")
+            now_utc = datetime.now(timezone.utc)
+            timeout_minutes = config_service.getint('Trading', 'market_confirmation_timeout_minutes', fallback=3)
+
+            for conf_id, conf_data in active_confirmations.items():
+                conf_timestamp = conf_data['timestamp']
+                expiry_time = conf_timestamp + timedelta(minutes=timeout_minutes)
+                message_id_to_edit = conf_data['message_id']
+                chat_id_to_edit_in = conf_data['chat_id'] # Get chat_id
+                trade_params = conf_data['trade_details']
+                initial_price = conf_data.get('initial_market_price') # Get stored initial price
+                symbol = trade_params.get('symbol')
+                action = trade_params.get('action') # BUY or SELL
+
+                # Check expiry (StateManager might remove it, but double check)
+                if now_utc > expiry_time:
+                    logger.info(f"[ConfUpdater] Confirmation {conf_id} seems expired. Skipping update (should be handled by callback).")
+                    # Optionally force removal if callback handler missed it?
+                    # state_manager.remove_pending_confirmation(conf_id)
+                    continue
+
+                if not symbol or not action:
+                    logger.warning(f"[ConfUpdater] Skipping update for {conf_id}: Missing symbol or action in trade_details.")
+                    continue
+
+                # Fetch current price
+                current_price_str = "<i>N/A</i>"
+                tick = mt5_fetcher.get_symbol_tick(symbol)
+                if tick:
+                    current_price_str = f"Ask:<code>{tick.ask}</code> Bid:<code>{tick.bid}</code>"
+                else:
+                     logger.warning(f"[ConfUpdater] Could not fetch current tick for {symbol} to update confirmation {conf_id}.")
+                     # Keep previous "Fetching..." or show N/A? Let's show N/A after first failure.
+                     # We need the original message text structure here.
+
+                # Reconstruct the message text (similar to event_processor)
+                # This is fragile if the original text format changes.
+                # Consider storing the base text format or using a template.
+                sl_str_conf = f"<code>{trade_params.get('sl')}</code>" if trade_params.get('sl') is not None else "<i>None</i>"
+                tp_str_conf = f"<code>{trade_params.get('tp')}</code>" if trade_params.get('tp') is not None else "<i>None</i>"
+                symbol_str_safe = symbol.replace('&', '&amp;').replace('<', '<').replace('>', '>') # Basic escaping
+                action_str = "BUY" if action == "BUY" else "SELL" # Assuming action is BUY/SELL string
+                # Display initial price based on action
+                initial_price_display = "<i>N/A</i>"
+                if initial_price is not None:
+                     initial_price_display = f"Ask:<code>{initial_price}</code>" if action == "BUY" else f"Bid:<code>{initial_price}</code>"
+
+
+                # Use the specific ID for the span - This won't work as Telegram doesn't support dynamic IDs/JS
+                # We need to replace the whole line.
+                # current_price_span = f'<span class="tg-spoiler" id="current-price-{conf_id}"><b>Current Price:</b> {current_price_str}</span>'
+                current_price_line = f"<b>Current Price:</b> {current_price_str}"
+
+
+                updated_text = TelegramSender.format_confirmation_message(
+                    trade_params=trade_params,
+                    confirmation_id=conf_id,
+                    timeout_minutes=timeout_minutes,
+                    initial_market_price=initial_price,
+                    current_price_str=current_price_line
+                )
+
+                # Edit the message using TelegramSender
+                if chat_id_to_edit_in:
+                    # Recreate the original buttons to pass them to edit_message
+                    # This assumes the button structure is always the same Yes/No
+                    from telethon.tl.custom import Button # Ensure import
+                    original_buttons = [
+                        [ Button.inline("✅ Yes", data=f"confirm_yes_{conf_id}"),
+                          Button.inline("❌ No", data=f"confirm_no_{conf_id}") ]
+                    ]
+                    edit_success = await telegram_sender.edit_message(
+                        chat_id=chat_id_to_edit_in,
+                        message_id=message_id_to_edit,
+                        new_text=updated_text,
+                        buttons=original_buttons # Pass buttons to preserve them
+                    )
+                    if not edit_success:
+                         logger.warning(f"[ConfUpdater] Failed to edit confirmation message {message_id_to_edit} in chat {chat_id_to_edit_in}.")
+                         # Consider removing confirmation from state if edit fails repeatedly?
+                else:
+                    # This case should ideally not happen if chat_id is stored correctly
+                    logger.error(f"[ConfUpdater] Cannot edit message {message_id_to_edit}, chat_id not found in confirmation data for {conf_id}.")
+
+
+        except asyncio.CancelledError:
+            logger.info("Confirmation message updater task cancelled.")
+            break
+        except Exception as e:
+            logger.error(f"Error in confirmation message updater task: {e}", exc_info=True)
+            # Avoid rapid errors
+            await asyncio.sleep(interval_seconds * 5)
+
 
 # --- Main Application Function ---
 async def run_bot():
@@ -385,7 +508,7 @@ async def run_bot():
     global logger, config_service, mt5_connector, mt5_fetcher, llm_interface, \
            signal_analyzer, duplicate_checker, decision_logic, trade_calculator, \
            mt5_executor, telegram_reader, telegram_sender, state_manager, trade_manager, \
-           config_file_path, last_config_mtime, config_reloader_task, periodic_monitor_task # Replace shared_config
+           config_file_path, last_config_mtime, config_reloader_task, periodic_monitor_task, confirmation_update_task, daily_summary_task_handle # Added tasks
 
     # 1. Load Initial Config into shared_config
     # 1. Initialize Config Service (this loads the config)
@@ -478,14 +601,20 @@ async def run_bot():
         periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt5_executor, interval_seconds=monitor_interval),
         name="TradeClosureMonitorTask"
     )
+    conf_update_interval = config_service.getint('Misc', 'confirmation_update_interval_seconds', fallback=10)
+    if conf_update_interval > 0:
+        confirmation_update_task = asyncio.create_task(
+            confirmation_updater_task_func(conf_update_interval),
+            name="ConfirmationUpdateTask"
+    )
+    daily_summary_task_handle = asyncio.create_task( # Start daily summary task
+        daily_summary_task(state_manager, telegram_sender),
+        name="DailySummaryTask"
+    )
 
     logger.info("Bot main components started. Handing control to Telegram client...")
     # Run the reader client until it's disconnected (e.g., by signal handler)
     try:
-        daily_summary_task_handle = asyncio.create_task(
-            daily_summary_task(state_manager, telegram_sender),
-            name="DailySummaryTask"
-        )
         if telegram_reader and telegram_reader.client:
             # Also run the sender client if it's separate and needs to run
             # In this case, sender uses start() which doesn't block like run_until_disconnected
@@ -505,6 +634,12 @@ async def run_bot():
         if periodic_monitor_task and not periodic_monitor_task.done():
              logger.info("Shutdown: Cancelling periodic monitor task...")
              periodic_monitor_task.cancel()
+        if confirmation_update_task and not confirmation_update_task.done():
+             logger.info("Shutdown: Cancelling confirmation updater task...")
+             confirmation_update_task.cancel()
+        if daily_summary_task_handle and not daily_summary_task_handle.done(): # Cancel daily summary
+             logger.info("Shutdown: Cancelling daily summary task...")
+             daily_summary_task_handle.cancel()
         if telegram_reader:
              await telegram_reader.stop()
         if telegram_sender:
@@ -540,6 +675,8 @@ if __name__ == "__main__":
         try:
             if config_reloader_task and not config_reloader_task.done(): config_reloader_task.cancel()
             if periodic_monitor_task and not periodic_monitor_task.done(): periodic_monitor_task.cancel()
+            if confirmation_update_task and not confirmation_update_task.done(): confirmation_update_task.cancel()
+            if daily_summary_task_handle and not daily_summary_task_handle.done(): daily_summary_task_handle.cancel() # Cancel daily summary
             if telegram_reader: asyncio.create_task(telegram_reader.stop())
             if telegram_sender: asyncio.create_task(telegram_sender.disconnect())
             if mt5_connector: mt5_connector.disconnect()

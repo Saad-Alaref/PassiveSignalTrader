@@ -340,6 +340,18 @@ async def process_new_signal(signal_data: SignalData, message_id, state_manager:
             confirmation_id = str(uuid.uuid4()) # Generate unique ID
             confirmation_timeout_minutes = config_service_instance.getint('Trading', 'market_confirmation_timeout_minutes', fallback=3)
 
+            # --- Fetch current price for initial display ---
+            initial_market_price = None
+            initial_price_str = "<i>N/A</i>"
+            tick = mt5_fetcher.get_symbol_tick(trade_symbol)
+            if tick:
+                initial_market_price = tick.ask if action == "BUY" else tick.bid
+                initial_price_str = f"Ask:<code>{tick.ask}</code> Bid:<code>{tick.bid}</code>"
+                logger.info(f"{log_prefix} Fetched initial market price for confirmation: {initial_price_str}")
+            else:
+                logger.warning(f"{log_prefix} Could not fetch initial market price for confirmation message.")
+            # --- End Fetch initial price ---
+
             # Prepare parameters needed for execution if confirmed
             trade_params_for_confirmation = {
                 'action': action,
@@ -354,19 +366,14 @@ async def process_new_signal(signal_data: SignalData, message_id, state_manager:
                 'auto_tp_applied': auto_tp_applied # Add AutoTP status
             }
 
-            # Format the message for the user
-            action_str = "BUY" if action == "BUY" else "SELL"
-            symbol_str_safe = trade_symbol.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-            sl_str_conf = f"<code>{exec_sl}</code>" if exec_sl is not None else "<i>None</i>"
-            tp_str_conf = f"<code>{exec_tp}</code>" if exec_tp is not None else "<i>None</i>"
-            confirmation_text = f"""❓ <b>Confirm Market Trade?</b> <code>[MsgID: {message_id}]</code>
-
-<b>Action:</b> <code>{action_str}</code>
-<b>Symbol:</b> <code>{symbol_str_safe}</code>
-<b>Volume:</b> <code>{lot_size}</code>
-<b>SL:</b> {sl_str_conf} | <b>TP:</b> {tp_str_conf}
-
-<i>This confirmation expires in {confirmation_timeout_minutes} minutes.</i>"""
+            # Format the message for the user using the reusable function
+            confirmation_text = TelegramSender.format_confirmation_message(
+                trade_params=trade_params_for_confirmation,
+                confirmation_id=confirmation_id,
+                timeout_minutes=confirmation_timeout_minutes,
+                initial_market_price=initial_market_price,
+                current_price_str='<span class="tg-spoiler" id="current-price-' + confirmation_id + '"><b>Current Price:</b> Fetching...</span>'
+            )
 
             # Send the message with buttons
             sent_conf_message = await telegram_sender.send_confirmation_message(
@@ -378,10 +385,14 @@ async def process_new_signal(signal_data: SignalData, message_id, state_manager:
             if sent_conf_message:
                 logger.info(f"{log_prefix} Confirmation message sent (ConfID: {confirmation_id}, MsgID: {sent_conf_message.id}). Awaiting user response.")
                 # Store pending confirmation details in StateManager
+                # Get chat_id from the sent message object
+                chat_id_where_sent = sent_conf_message.chat_id
                 state_manager.add_pending_confirmation(
                     confirmation_id=confirmation_id,
                     trade_details=trade_params_for_confirmation,
                     message_id=sent_conf_message.id,
+                    chat_id=chat_id_where_sent, # Pass chat_id
+                    initial_market_price=initial_market_price, # Pass initial price
                     timestamp=datetime.now(timezone.utc)
                 )
                 # No separate status update needed, the confirmation message itself serves this purpose.
@@ -549,8 +560,11 @@ async def process_update(analysis_result: dict, event, state_manager: StateManag
                 # Use attribute access for TradeInfo object
                 logger.info(f"{log_prefix} Found tracked trade (Ticket: {target_trade_info.ticket}, OrigMsgID: {target_trade_info.original_msg_id}) linked to original message {original_msg_id}.")
                 # Analyze the *edit/reply* text to get update details
-                logger.info(f"{log_prefix} Re-analyzing edit/reply text for update details...")
-                update_analysis_result = signal_analyzer.analyze(message_text, image_data, llm_context) # Re-analyze edit/reply text
+                logger.info(f"{log_prefix} Re-analyzing edit/reply text specifically for update parameters...")
+                # Pass analysis_mode hint to analyzer
+                update_analysis_result = signal_analyzer.analyze(
+                    message_text, image_data, llm_context, analysis_mode='extract_update_params'
+                )
                 logger.debug(f"{log_prefix} Re-analysis result for edit/reply: {update_analysis_result}")
 
                 if update_analysis_result and update_analysis_result.get('type') == 'update' and update_analysis_result.get('data'):

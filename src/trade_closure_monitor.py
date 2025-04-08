@@ -5,7 +5,6 @@ import logging
 
 logger = logging.getLogger('TradeBot')
 
-closed_trades_log = []
 
 async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt5_executor, interval_seconds=60):
     """
@@ -69,8 +68,8 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                         original_msg_id = getattr(trade, 'original_msg_id', None)
                         await telegram_sender.send_message(msg, parse_mode='html', reply_to=original_msg_id)
                         # Log for daily summary (optional, maybe filter out canceled?)
-                        closed_trades_log.append({
-                            'ticket': ticket, 'symbol': trade.symbol, 'profit': 0.0, # No profit for canceled
+                        state_manager.record_closed_trade({
+                            'ticket': ticket, 'symbol': trade.symbol, 'profit': 0.0,
                             'close_time': close_time, 'reason': close_reason
                         })
                         # Remove from active trades
@@ -152,7 +151,14 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                 # --- Compose Closed Trade Message ---
                 # Calculate pips
                 digits = 2
-                trade_type = getattr(trade, 'trade_type', None)
+                # Determine trade type from the closing deal if possible, otherwise from order history
+                trade_type = None
+                if closing_deal:
+                    # closing_deal.type is DEAL_TYPE_BUY (0) or DEAL_TYPE_SELL (1)
+                    trade_type = mt5.ORDER_TYPE_BUY if closing_deal.type == mt5.DEAL_TYPE_BUY else mt5.ORDER_TYPE_SELL
+                elif orders: # Use orders fetched earlier for cancellation check
+                    # last_order_state was determined earlier if orders exist
+                    trade_type = last_order_state.type # ORDER_TYPE_BUY (0) or ORDER_TYPE_SELL (1)
                 try:
                     symbol_info = mt5.symbol_info(trade.symbol)
                     if symbol_info:
@@ -162,7 +168,8 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                 points = 0.0 # Renamed from pips
                 if close_price and trade.entry_price:
                     points = (close_price - trade.entry_price) * (10 ** digits) # This calculates points
-                    if trade_type == mt5.ORDER_TYPE_SELL:
+                    # Check if it was a SELL trade to invert points
+                    if trade_type == mt5.ORDER_TYPE_SELL: # Compare with MT5 constant
                         points = -points
 
                 # Use HTML escaping for safety, especially for reason
@@ -196,12 +203,12 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                 # Log for daily summary, storing None if unknown
                 # Log for daily summary, storing None if unknown
                 # Log for daily summary, storing None if unknown
-                closed_trades_log.append({
+                state_manager.record_closed_trade({
                     'ticket': ticket,
                     'symbol': trade.symbol,
-                    'profit': profit, # Log the float value or None
-                    'close_time': close_time, # Log the datetime object or None
-                    'reason': close_reason if close_reason is not None else "Unknown" # Log reason or Unknown
+                    'profit': profit,
+                    'close_time': close_time,
+                    'reason': close_reason if close_reason is not None else "Unknown"
                 })
                 # --- End Compose Closed Trade Message ---
 

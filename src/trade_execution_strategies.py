@@ -70,6 +70,7 @@ class ExecutionStrategy(ABC):
             'assigned_tp': assigned_tp, # The TP actually set on this order/position
             'is_pending': is_pending,
             'sequence_info': sequence_info,
+            'original_msg_id': self.message_id,  # Link trade to original signal message ID
             # Other fields like tsl_active, auto_sl_pending_timestamp are initialized within TradeInfo dataclass
         }
         if self.state_manager:

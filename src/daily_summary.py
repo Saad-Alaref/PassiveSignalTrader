@@ -1,4 +1,5 @@
 import asyncio
+import MetaTrader5 as mt5
 from datetime import datetime, timedelta, timezone
 import logging
 
@@ -8,7 +9,6 @@ async def daily_summary_task(state_manager, telegram_sender, summary_hour=23, su
     """
     Sends a daily summary of closed trades at a fixed time, skipping weekends.
     """
-    closed_trades_log = []
 
     while True:
         now = datetime.now(timezone.utc)
@@ -28,33 +28,64 @@ async def daily_summary_task(state_manager, telegram_sender, summary_hour=23, su
             logger.info("Weekend detected, skipping daily summary.")
             continue
 
-        # Compose summary
+        # Ensure MT5 connection is initialized
+        if not mt5.initialize():
+            logger.error(f"MT5 initialize() failed, error code = {mt5.last_error()}")
+            continue
+
+        # Fetch today's deals from MetaTrader5
+        date_from = datetime.combine(next_run.date(), datetime.min.time()).replace(tzinfo=timezone.utc)
+        date_to = next_run
+
+        deals = mt5.history_deals_get(date_from, date_to)
+
+        if deals is None or len(deals) == 0:
+            msg = f"📊 <b>Daily Trade Summary</b>\n"
+            msg += f"<b>Date:</b> {next_run.date()}\n"
+            msg += "No closed trades found for today."
+            await telegram_sender.send_message(msg, parse_mode='html')
+            continue
+
         total_profit = 0.0
-        total_trades = len(closed_trades_log)
         wins = 0
         losses = 0
-        canceled = 0
+        symbols_stats = {}
+        largest_win = float('-inf')
+        largest_loss = float('inf')
 
-        for trade in closed_trades_log:
-            profit = trade.get('profit', 0.0)
+        for deal in deals:
+            profit = deal.profit
+            symbol = deal.symbol
             total_profit += profit
-            reason = trade.get('reason', '')
-            if reason == 'Canceled':
-                canceled += 1
-            elif profit > 0:
+
+            if profit > 0:
                 wins += 1
+                if profit > largest_win:
+                    largest_win = profit
             else:
                 losses += 1
+                if profit < largest_loss:
+                    largest_loss = profit
+
+            if symbol not in symbols_stats:
+                symbols_stats[symbol] = {'profit': 0.0, 'count': 0}
+            symbols_stats[symbol]['profit'] += profit
+            symbols_stats[symbol]['count'] += 1
 
         msg = f"📊 <b>Daily Trade Summary</b>\n"
         msg += f"<b>Date:</b> {next_run.date()}\n"
-        msg += f"<b>Total Trades Closed:</b> {total_trades}\n"
+        msg += f"<b>Total Trades Closed:</b> {len(deals)}\n"
         msg += f"<b>Wins:</b> {wins}\n"
         msg += f"<b>Losses:</b> {losses}\n"
-        msg += f"<b>Canceled:</b> {canceled}\n"
         msg += f"<b>Total Profit:</b> <code>{total_profit:.2f}</code>\n"
 
-        await telegram_sender.send_message(msg, parse_mode='html')
+        if largest_win != float('-inf'):
+            msg += f"<b>Largest Win:</b> <code>{largest_win:.2f}</code>\n"
+        if largest_loss != float('inf'):
+            msg += f"<b>Largest Loss:</b> <code>{largest_loss:.2f}</code>\n"
 
-        # Reset log for next day
-        closed_trades_log.clear()
+        msg += "\n<b>Performance by Symbol:</b>\n"
+        for symbol, stats in symbols_stats.items():
+            msg += f"{symbol}: {stats['count']} trades, PnL: <code>{stats['profit']:.2f}</code>\n"
+
+        await telegram_sender.send_message(msg, parse_mode='html')

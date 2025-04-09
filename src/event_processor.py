@@ -7,7 +7,7 @@ from telethon import events
 
 # Import necessary components (adjust as needed based on moved logic)
 from src.state_manager import StateManager
-from src.models import SignalData
+from src.models import SignalData, UpdateData
 from src.decision_logic import DecisionLogic
 from src.trade_calculator import TradeCalculator
 from src.mt5_executor import MT5Executor
@@ -559,12 +559,69 @@ async def process_update(analysis_result: dict, event, state_manager: StateManag
             if target_trade_info:
                 # Use attribute access for TradeInfo object
                 logger.info(f"{log_prefix} Found tracked trade (Ticket: {target_trade_info.ticket}, OrigMsgID: {target_trade_info.original_msg_id}) linked to original message {original_msg_id}.")
-                # Analyze the *edit/reply* text to get update details
-                logger.info(f"{log_prefix} Re-analyzing edit/reply text specifically for update parameters...")
-                # Pass analysis_mode hint to analyzer
-                update_analysis_result = signal_analyzer.analyze(
-                    message_text, image_data=None, context=llm_context, analysis_mode='extract_update_params'
-                )
+
+                # --- Heuristic Check for Simple SL/TP Edits ---
+                update_data_obj = None # Initialize update_data_obj here
+                update_handled_heuristically = False
+                try:
+                    import re
+                    # Simple regex to find SL/TP lines (adjust as needed for your format)
+                    sl_match = re.search(r"(?:SL|Stop Loss)[:\s]*([\d.]+)", message_text, re.IGNORECASE)
+                    tp_matches = re.findall(r"(?:TP|Take Profit)\d*[:\s]*([\d.,\s-]+(?:open)?)", message_text, re.IGNORECASE) # Handle multiple TPs, ranges, "open"
+
+                    new_sl_heuristic = float(sl_match.group(1)) if sl_match else None
+                    # Basic parsing for TPs found by regex - needs refinement for ranges/open
+                    new_tps_heuristic = []
+                    if tp_matches:
+                         for tp_str in tp_matches:
+                              # Simple parsing, assumes single values for now
+                              try:
+                                   # Attempt to convert directly to float
+                                   new_tps_heuristic.append(float(tp_str.strip().replace(',', ''))) # Handle potential commas
+                              except ValueError:
+                                   # Handle "open" or other non-numeric TP values
+                                   if "open" in tp_str.lower():
+                                       new_tps_heuristic.append("N/A") # Treat "open" as N/A
+                                   else:
+                                       logger.warning(f"{log_prefix} Could not parse TP value '{tp_str}' in heuristic check.")
+                                       # Optionally append "N/A" or skip if unparseable
+
+                    # Compare with original trade info (handle N/A comparison carefully)
+                    # Convert N/A strings to None for comparison if needed, or handle directly
+                    original_sl = target_trade_info.initial_sl if target_trade_info.initial_sl != "N/A" else None
+                    sl_changed = (new_sl_heuristic is not None and new_sl_heuristic != original_sl)
+
+                    # Basic TP comparison - might need better list comparison logic
+                    original_tps = target_trade_info.all_tps if target_trade_info.all_tps != ["N/A"] else []
+                    tps_changed = (new_tps_heuristic and new_tps_heuristic != original_tps) # Simple list inequality check
+
+                    # If ONLY SL and/or TPs seem to have changed in the edit text
+                    # AND the text doesn't contain other strong update keywords (close, cancel, BE etc.)
+                    # This is a basic heuristic, might need refinement
+                    other_keywords = ["close", "cancel", "be", "breakeven", "entry"]
+                    contains_other_keywords = any(keyword in message_text.lower() for keyword in other_keywords)
+
+                    if (sl_changed or tps_changed) and not contains_other_keywords:
+                        logger.info(f"{log_prefix} Heuristic detected simple SL/TP edit. Bypassing LLM re-analysis.")
+                        update_data_obj = UpdateData(
+                            update_type='modify_sltp',
+                            symbol=target_trade_info.symbol, # Use symbol from context
+                            # Use validated heuristic values or "N/A"
+                            new_stop_loss=new_sl_heuristic if sl_changed and new_sl_heuristic is not None else "N/A",
+                            new_take_profits=new_tps_heuristic if tps_changed and new_tps_heuristic else ["N/A"]
+                        )
+                        update_handled_heuristically = True
+                except Exception as e:
+                    logger.warning(f"{log_prefix} Error during heuristic SL/TP check: {e}. Proceeding with LLM analysis.")
+                # --- End Heuristic Check ---
+
+                # Analyze the *edit/reply* text using LLM if not handled heuristically
+                if not update_handled_heuristically:
+                    logger.info(f"{log_prefix} Re-analyzing edit/reply text using LLM...")
+                    # Re-analyze using the standard prompt; LLM should handle edit/reply context
+                    update_analysis_result = signal_analyzer.analyze(
+                        message_text, image_data=None, context=llm_context
+                    )
                 logger.debug(f"{log_prefix} Re-analysis result for edit/reply: {update_analysis_result}")
 
                 if update_analysis_result and update_analysis_result.get('type') == 'update' and update_analysis_result.get('data'):

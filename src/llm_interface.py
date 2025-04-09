@@ -25,7 +25,8 @@ class LLMInterface:
         self.config_service = config_service_instance # Store service instance
         self.api_key = self.config_service.get('Gemini', 'api_key', fallback=None) # Use service
         self.model_name = self.config_service.get('Gemini', 'model_name', fallback='gemini-pro') # Use service
-        # self.config = config # No longer need to store the old config object
+        self.temperature = self.config_service.getfloat('Gemini', 'temperature', fallback=0.2) # Read temperature
+        self.use_json_mode = self.config_service.getboolean('Gemini', 'enable_json_mode', fallback=False) # Read JSON mode flag
 
         if not self.api_key:
             logger.critical("Gemini API key not found in configuration. LLM features will be disabled.")
@@ -45,7 +46,14 @@ class LLMInterface:
                     self.supports_vision = False
                     logger.info(f"Configuring Gemini with text-only model: {self.model_name}")
 
-                # TODO: Add generation_config options if needed (temperature, top_p, etc.)
+                # Create GenerationConfig
+                generation_config_args = {"temperature": self.temperature}
+                if self.use_json_mode:
+                    # Ensure the prompt explicitly asks for JSON
+                    logger.info("Enabling JSON output mode for Gemini.")
+                    generation_config_args["response_mime_type"] = "application/json"
+                self.generation_config = genai.GenerationConfig(**generation_config_args)
+
                 self.model = genai.GenerativeModel(self.model_name)
                 logger.info("Gemini client configured successfully.")
             except Exception as e:
@@ -94,8 +102,7 @@ class LLMInterface:
         # --- Get Prompts from Config ---
         base_instructions_template = self.config_service.get('LLMPrompts', 'base_instructions', fallback="ERROR: base_instructions not found in config") # Use service
         analyze_signal_instructions = self.config_service.get('LLMPrompts', 'analyze_signal_instructions', fallback="ERROR: analyze_signal_instructions not found in config")
-        # analyze_edit_or_reply_instructions = self.config_service.get('LLMPrompts', 'analyze_edit_or_reply_instructions', fallback="ERROR: analyze_edit_or_reply_instructions not found in config") # Deprecated
-        analyze_edit_update_instructions = self.config_service.get('LLMPrompts', 'analyze_edit_update_instructions', fallback="ERROR: analyze_edit_update_instructions not found in config") # New prompt for edits
+        analyze_edit_update_instructions = self.config_service.get('LLMPrompts', 'analyze_edit_update_instructions', fallback="ERROR: analyze_edit_update_instructions not found in config") # Prompt for extracting only updated params from edits
 
         # --- Format Base Prompt ---
         # Use .format() for safe insertion of potentially complex context/message strings
@@ -106,8 +113,7 @@ class LLMInterface:
         elif prompt_type == "analyze_edit_update":
              # Instructions specifically for extracting update parameters from an edited signal message
              prompt = base_instructions + "\n" + analyze_edit_update_instructions
-        # elif prompt_type == "analyze_edit_or_reply": # Deprecated prompt type
-        #      prompt = base_instructions + "\n" + analyze_edit_or_reply_instructions
+        # Removed deprecated analyze_edit_or_reply prompt type
         else:
             logger.warning(f"Unknown prompt type requested: {prompt_type}. Using default analyze_signal.")
             # Fallback to the main analysis prompt
@@ -158,20 +164,29 @@ class LLMInterface:
                 log_prompt = prompt if len(prompt) < 500 else prompt[:500] + "..." # Avoid overly long logs
                 logger.debug(f"Gemini Prompt ({prompt_type}):\n{log_prompt}")
                 # Use generate_content for potentially mixed text/image input
-                response = self.model.generate_content(content_parts)
+                response = self.model.generate_content(
+                    content_parts,
+                    generation_config=self.generation_config # Pass the config here
+                )
 
                 # Log raw response text for debugging
                 logger.debug(f"Gemini raw response text: {response.text}")
 
                 # Attempt to parse the response text as JSON
                 try:
-                    # Gemini might wrap JSON in ```json ... ```, try to extract it
-                    json_response_str = response.text.strip()
-                    if json_response_str.startswith("```json"):
-                        json_response_str = json_response_str[7:]
-                    if json_response_str.endswith("```"):
-                        json_response_str = json_response_str[:-3]
-                    json_response_str = json_response_str.strip()
+                    # If JSON mode is enabled, response.text should be directly parsable JSON
+                    if self.use_json_mode:
+                         json_response_str = response.text
+                         logger.debug("Attempting to parse JSON directly (JSON mode enabled).")
+                    else:
+                        # Fallback: Try to extract JSON from markdown if not using JSON mode
+                        logger.debug("Attempting to extract JSON from markdown (JSON mode disabled).")
+                        json_response_str = response.text.strip()
+                        if json_response_str.startswith("```json"):
+                            json_response_str = json_response_str[7:]
+                        if json_response_str.endswith("```"):
+                            json_response_str = json_response_str[:-3]
+                        json_response_str = json_response_str.strip()
 
                     result_dict = json.loads(json_response_str)
                     logger.info(f"Gemini analysis successful. Type: {prompt_type}")

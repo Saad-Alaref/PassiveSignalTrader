@@ -59,7 +59,6 @@ class ExecutionStrategy(ABC):
             'ticket': ticket,
             'symbol': self.trade_symbol,
             'open_time': open_time,
-            'original_msg_id': self.message_id,
             'entry_price': entry_price,
             'initial_sl': self.exec_sl,
             'original_volume': volume, # Volume of this specific trade/order

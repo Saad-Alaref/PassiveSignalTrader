@@ -157,23 +157,45 @@ class DistributedLimitsStrategy(ExecutionStrategy):
 
             current_entry_price = round(current_entry_price, self.digits)
 
+            # --- Adjust Entry Price for Spread ---
+            adjusted_entry_price = current_entry_price # Default to original
+            try:
+                tick = self.mt5_fetcher.get_symbol_tick(self.trade_symbol)
+                if tick:
+                    spread = round(tick.ask - tick.bid, self.digits)
+                    if limit_order_type == mt5.ORDER_TYPE_BUY_LIMIT: # Buy Limit: Entry = Signal + Spread
+                        adjusted_entry_price = round(current_entry_price + spread, self.digits)
+                    elif limit_order_type == mt5.ORDER_TYPE_SELL_LIMIT: # Sell Limit: Entry = Signal - Spread
+                        adjusted_entry_price = round(current_entry_price - spread, self.digits)
+                    # Note: Stop orders might not need adjustment or need opposite adjustment depending on goal.
+                    # Keeping adjustment only for LIMIT orders for now to avoid missing fills.
+                    if adjusted_entry_price != current_entry_price:
+                         logger.info(f"{self.log_prefix} Adjusted entry for spread: Original={current_entry_price}, Spread={spread} -> Adjusted={adjusted_entry_price}")
+                else:
+                    logger.warning(f"{self.log_prefix} Could not get tick data to adjust entry price for spread.")
+            except Exception as e:
+                logger.error(f"{self.log_prefix} Error adjusting entry price for spread: {e}")
+            # --- End Entry Price Adjustment ---
+
+
             # Determine TP
             tp_index = min(i, len(self.numeric_tps) - 1)
             current_exec_tp = self.numeric_tps[tp_index]
             trade_comment = f"TB SigID {self.message_id} Dist {i+1}/{total_trades_to_open}"
 
-            logger.info(f"{self.log_prefix} Placing pending limit order {i+1}/{total_trades_to_open}: Type={limit_order_type}, Vol={current_vol}, Entry={current_entry_price}, TP={current_exec_tp}")
+            logger.info(f"{self.log_prefix} Placing pending limit order {i+1}/{total_trades_to_open}: Type={limit_order_type}, Vol={current_vol}, Entry={adjusted_entry_price} (Orig: {current_entry_price}), TP={current_exec_tp}")
 
             trade_result_tuple = self.mt5_executor.execute_trade(
                 action=self.action, symbol=self.trade_symbol, order_type=limit_order_type,
-                volume=current_vol, price=current_entry_price, sl=self.exec_sl, tp=current_exec_tp,
+                volume=current_vol, price=adjusted_entry_price, sl=self.exec_sl, tp=current_exec_tp,
                 comment=trade_comment
             )
             trade_result, _ = trade_result_tuple if trade_result_tuple else (None, None)
 
             if trade_result and trade_result.retcode == mt5.TRADE_RETCODE_DONE:
                 ticket = trade_result.order
-                executed_tickets_info.append({'ticket': ticket, 'vol': current_vol, 'tp': current_exec_tp, 'entry': current_entry_price})
+                # Store the *adjusted* entry price used for the order
+                executed_tickets_info.append({'ticket': ticket, 'vol': current_vol, 'tp': current_exec_tp, 'entry': adjusted_entry_price})
                 successful_trades += 1
                 logger.info(f"{self.log_prefix} Pending limit order {i+1} placed successfully. Ticket: {ticket}")
                 self._store_trade_info(
@@ -342,9 +364,31 @@ class SingleTradeStrategy(ExecutionStrategy):
     async def execute(self):
         logger.info(f"{self.log_prefix} Executing as single trade. Vol={self.lot_size}, TP={self.exec_tp}")
 
+        # --- Adjust Entry Price for Spread (Pending Orders Only) ---
+        price_to_execute = self.exec_price
+        is_pending = self.determined_order_type not in [mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL]
+        if is_pending and self.exec_price is not None:
+            try:
+                tick = self.mt5_fetcher.get_symbol_tick(self.trade_symbol)
+                if tick:
+                    spread = round(tick.ask - tick.bid, self.digits)
+                    original_entry = self.exec_price
+                    if self.determined_order_type in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP]: # Buy Pending: Entry = Signal + Spread
+                        price_to_execute = round(original_entry + spread, self.digits)
+                    elif self.determined_order_type in [mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP]: # Sell Pending: Entry = Signal - Spread
+                        price_to_execute = round(original_entry - spread, self.digits)
+
+                    if price_to_execute != original_entry:
+                         logger.info(f"{self.log_prefix} Adjusted entry for spread: Original={original_entry}, Spread={spread} -> Adjusted={price_to_execute}")
+                else:
+                    logger.warning(f"{self.log_prefix} Could not get tick data to adjust entry price for spread.")
+            except Exception as e:
+                logger.error(f"{self.log_prefix} Error adjusting entry price for spread: {e}")
+        # --- End Entry Price Adjustment ---
+
         trade_result_tuple = self.mt5_executor.execute_trade(
             action=self.action, symbol=self.trade_symbol, order_type=self.determined_order_type,
-            volume=self.lot_size, price=self.exec_price, sl=self.exec_sl, tp=self.exec_tp,
+            volume=self.lot_size, price=price_to_execute, sl=self.exec_sl, tp=self.exec_tp,
             comment=f"TB SigID {self.message_id}"
         )
         trade_result, actual_exec_price = trade_result_tuple if trade_result_tuple else (None, None)
@@ -353,7 +397,8 @@ class SingleTradeStrategy(ExecutionStrategy):
             ticket = trade_result.order
             order_type_str_map = { mt5.ORDER_TYPE_BUY: "Market BUY", mt5.ORDER_TYPE_SELL: "Market SELL", mt5.ORDER_TYPE_BUY_LIMIT: "BUY LIMIT", mt5.ORDER_TYPE_SELL_LIMIT: "SELL LIMIT", mt5.ORDER_TYPE_BUY_STOP: "BUY STOP", mt5.ORDER_TYPE_SELL_STOP: "SELL STOP" }
             order_type_str = order_type_str_map.get(self.determined_order_type, f"Type {self.determined_order_type}")
-            final_entry_price = actual_exec_price if actual_exec_price is not None else self.exec_price
+            # Use adjusted price for pending, actual exec price for market
+            final_entry_price = price_to_execute if is_pending else actual_exec_price
             is_pending = self.determined_order_type not in [mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL]
 
             entry_str = f"<code>@{final_entry_price}</code>" if final_entry_price is not None else "<code>Market</code>"

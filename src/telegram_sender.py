@@ -7,6 +7,8 @@ import uuid # To generate unique IDs for confirmations
 from .config_service import config_service # Import the service
 import sys
 from datetime import datetime, timezone, timedelta
+import pytz
+
 
 import MetaTrader5 as mt5 # Import the MT5 library
 from telethon import TelegramClient, events # Import events
@@ -21,6 +23,7 @@ from .mt5_data_fetcher import MT5DataFetcher # Import MT5DataFetcher
 
 
 logger = logging.getLogger('TradeBot')
+TARGET_TIMEZONE = pytz.timezone('Asia/Damascus') # Define target timezone
 
 class TelegramSender:
 
@@ -464,7 +467,8 @@ class TelegramSender:
                 logger.warning(f"{log_prefix} Confirmation request expired (Expiry: {expiry_time}, Now: {now}).")
                 answer_text = "This confirmation request has expired."
                 alert_answer = True
-                expiry_time_str = expiry_time.strftime('%Y-%m-%d %H:%M:%S %Z')
+                expiry_time_local = expiry_time.astimezone(TARGET_TIMEZONE) if expiry_time else None
+                expiry_time_str = expiry_time_local.strftime('%Y-%m-%d %H:%M:%S %Z') if expiry_time_local else "<i>N/A</i>"
                 # Construct Expired message
                 final_message_text = f"""⏳ <b>Confirmation Expired</b> <code>[OrigMsgID: {original_signal_msg_id}]</code>
 

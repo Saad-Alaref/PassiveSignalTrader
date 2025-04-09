@@ -2,3 +2,4 @@ MetaTrader5
 Telethon
 google-generativeai
 Pillow
+pytz

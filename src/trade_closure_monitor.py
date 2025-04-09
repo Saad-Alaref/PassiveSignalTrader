@@ -2,8 +2,10 @@ import asyncio
 import MetaTrader5 as mt5
 from datetime import datetime, timezone
 import logging
+import pytz # Add pytz import
 
 logger = logging.getLogger('TradeBot')
+TARGET_TIMEZONE = pytz.timezone('Asia/Damascus') # Define target timezone
 
 
 async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt5_executor, interval_seconds=60):
@@ -209,7 +211,7 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                         # Convert price difference to pips (assuming 1 pip = 0.1 for XAUUSD)
                         # Points = price_diff * (10 ** digits)
                         # Pips = Points / 10
-                        pips = (price_diff * (10 ** digits)) / 10.0
+                        pips = (abs(price_diff) * (10 ** digits)) / 10.0
 
                     # Use HTML escaping for safety, especially for reason
                     import html
@@ -219,7 +221,8 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                     profit_display = f"<code>{profit:.2f}</code>" if profit is not None else "<i>N/A</i>" # Check if profit was found
                     close_price_display = f"<code>{close_price}</code>" if close_price is not None else "<i>N/A</i>"
                     reason_display = safe_reason if safe_reason else "<i>Unknown</i>"
-                    close_time_display = close_time.strftime('%Y-%m-%d %H:%M:%S %Z') if close_time else "<i>N/A</i>" # Added TZ
+                    close_time_local = close_time.astimezone(TARGET_TIMEZONE) if close_time else None
+                    close_time_display = close_time_local.strftime('%Y-%m-%d %H:%M:%S %Z') if close_time_local else "<i>N/A</i>"
                     pips_display = f"<code>{pips:.1f}</code>" if close_price is not None and trade.entry_price is not None else "<i>N/A</i>"
                     entry_price_display = f"<code>{trade.entry_price}</code>" if trade.entry_price is not None else "<i>N/A</i>"
 

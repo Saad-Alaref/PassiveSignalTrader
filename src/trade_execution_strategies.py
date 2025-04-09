@@ -193,7 +193,20 @@ class DistributedLimitsStrategy(ExecutionStrategy):
             status_message = f"{status_title} <code>[MsgID: {self.message_id}]</code>\n"
             status_message += f"<b>Symbol:</b> <code>{self.trade_symbol}</code> | <b>Total Vol:</b> <code>{self.lot_size}</code>\n"
             status_message += f"<b>Range:</b> <code>{low_price}-{high_price}</code>\n"
-            status_message += f"<b>SL:</b> {'<code>'+str(self.exec_sl)+'</code>' if self.exec_sl else '<i>None</i>'}\n"
+            # Calculate adjusted SL for display
+            adjusted_sl_display = '<i>None</i>'
+            if self.exec_sl:
+                try:
+                    # Need the order type (limit_order_type was determined earlier)
+                    adjusted_sl_val = self.mt5_executor._adjust_sl_for_spread_offset(
+                        self.exec_sl, limit_order_type, self.trade_symbol
+                    )
+                    adjusted_sl_display = f"<code>{adjusted_sl_val}</code>"
+                except Exception as e:
+                    logger.error(f"{self.log_prefix} Error calculating adjusted SL for display: {e}")
+                    adjusted_sl_display = f"<code>{self.exec_sl}</code> (Error adjusting)" # Show raw SL if adjustment fails
+
+            status_message += f"<b>Stop Loss:</b> {adjusted_sl_display}\n"
             status_message += "<b>Pending Orders Placed:</b>\n"
             for idx, trade in enumerate(executed_tickets_info):
                 status_message += f"  <code>{idx+1}. Ticket: {trade['ticket']}, Vol: {trade['vol']}, Entry: {trade['entry']}, TP: {trade['tp']}</code>\n"

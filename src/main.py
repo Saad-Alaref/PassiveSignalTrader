@@ -162,7 +162,8 @@ async def handle_telegram_event(event):
         if not is_edit and not reply_to_msg_id:
             try: # Add try block around analysis
                 # --- Call Analyzer with Context ---
-                analysis_result = signal_analyzer.analyze(message_text, image_data, llm_context)
+                # Always pass None for image_data to disable image analysis
+                analysis_result = signal_analyzer.analyze(message_text, image_data=None, context=llm_context)
                 analysis_type = analysis_result.get('type')
                 logger.info(f"{log_prefix} Signal analysis result type: {analysis_type}")
                 # Send analysis debug message

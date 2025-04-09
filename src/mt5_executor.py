@@ -25,6 +25,7 @@ class MT5Executor:
         self.requote_retries = self.config_service.getint('Retries', 'requote_retry_attempts', fallback=3) # Use getint
         self.requote_delay = self.config_service.getint('Retries', 'requote_retry_delay_seconds', fallback=2) # Use getint
         # Slippage/deviation will be read dynamically
+        self.sl_offset_pips = self.config_service.getfloat('Trading', 'sl_offset_pips', fallback=0.0) # Use service
 
     def _send_order_with_retry(self, request):
         """
@@ -153,6 +154,42 @@ class MT5Executor:
         logger.error("Max retries reached after requotes/price_off without success.")
         return None, None
 
+    def _adjust_sl_for_spread_offset(self, sl, order_type, symbol):
+        """Adjusts SL based on spread and configured offset."""
+        if sl is None or sl == 0.0:
+            return sl # No SL to adjust
+
+        symbol_info = mt5.symbol_info(symbol)
+        if not symbol_info:
+            logger.error(f"Cannot adjust SL: Failed to get symbol info for {symbol}")
+            return sl # Return original SL if info fails
+
+        point = symbol_info.point
+        digits = symbol_info.digits
+
+        tick = mt5.symbol_info_tick(symbol)
+        if not tick:
+            logger.warning(f"Cannot adjust SL: Failed to get tick for {symbol}. Using original SL.")
+            return sl
+
+        spread = round(tick.ask - tick.bid, digits)
+        offset_price = round(self.sl_offset_pips * (point * 10), digits) # Assuming 1 pip = 10 points
+
+        adjusted_sl = sl
+        if order_type in [mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP, mt5.ORDER_TYPE_BUY_STOP_LIMIT]:
+            adjusted_sl = round(sl - spread - offset_price, digits)
+            logger.debug(f"Adjusting BUY SL for {symbol}: Original={sl}, Spread={spread}, Offset={offset_price} -> Adjusted={adjusted_sl}")
+        elif order_type in [mt5.ORDER_TYPE_SELL, mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP, mt5.ORDER_TYPE_SELL_STOP_LIMIT]:
+            adjusted_sl = round(sl + spread + offset_price, digits)
+            logger.debug(f"Adjusting SELL SL for {symbol}: Original={sl}, Spread={spread}, Offset={offset_price} -> Adjusted={adjusted_sl}")
+        else:
+             logger.warning(f"Unknown order type {order_type} for SL adjustment. Using original SL.")
+
+        # Basic validation: Ensure SL is not placed on the wrong side of entry (e.g., due to large spread/offset)
+        # This requires entry price, which isn't available here. Add validation in calling functions if needed.
+
+        return adjusted_sl
+
     def execute_trade(self, action, symbol, order_type, volume, price=None, sl=None, tp=None, comment="TradeBot Signal"):
         """
         Constructs and sends a trade request (market or pending).
@@ -222,7 +259,8 @@ class MT5Executor:
 
         # Add SL and TP if provided (convert to float)
         if sl is not None:
-            request["sl"] = float(sl)
+            adjusted_sl = self._adjust_sl_for_spread_offset(float(sl), order_type, symbol)
+            request["sl"] = adjusted_sl
         if tp is not None:
             request["tp"] = float(tp)
 
@@ -284,13 +322,17 @@ class MT5Executor:
             is_position = True
             pos = position_info[0] # Get the position tuple
             logger.debug(f"Ticket {ticket} identified as an open position.")
+            # Adjust SL before setting it in the request
+            sl_to_set = float(new_sl) if new_sl is not None else float(pos.sl)
+            adjusted_sl = self._adjust_sl_for_spread_offset(sl_to_set, pos.type, pos.symbol)
+
             request = {
                 "action": mt5.TRADE_ACTION_SLTP, # Use SLTP action for positions
                 "position": ticket, # Use 'position' key
                 "symbol": pos.symbol,
                 # For SLTP action, provide the new value. If a new value is None,
                 # provide the *existing* value from the position to keep it unchanged.
-                "sl": float(new_sl) if new_sl is not None else float(pos.sl),
+                "sl": adjusted_sl, # Use adjusted SL
                 "tp": float(new_tp) if new_tp is not None else float(pos.tp),
             }
             # Ensure 0.0 is sent if the original or new value is effectively zero/None
@@ -303,6 +345,10 @@ class MT5Executor:
             if order_info and len(order_info) > 0:
                 ord_info = order_info[0] # Get the order tuple
                 logger.debug(f"Ticket {ticket} identified as a pending order.")
+                # Adjust SL before setting it in the request
+                sl_to_set = float(new_sl) if new_sl is not None else ord_info.sl
+                adjusted_sl = self._adjust_sl_for_spread_offset(sl_to_set, ord_info.type, ord_info.symbol)
+
                 # For pending orders, use TRADE_ACTION_MODIFY
                 request = {
                     "action": mt5.TRADE_ACTION_MODIFY,
@@ -311,7 +357,7 @@ class MT5Executor:
                     "price": ord_info.price_open, # Must provide original price for MODIFY
                     # For MODIFY action, provide the *new* value or 0.0 to remove.
                     # If the new value is None, send the original value to keep it unchanged.
-                    "sl": float(new_sl) if new_sl is not None else ord_info.sl,
+                    "sl": adjusted_sl, # Use adjusted SL
                     "tp": float(new_tp) if new_tp is not None else ord_info.tp,
                     "type": ord_info.type, # Must provide original type
                     "type_time": ord_info.type_time,
@@ -503,20 +549,11 @@ class MT5Executor:
              return True
         # Optional: Check if moving SL to BE would violate distance rules (though SLTP action might handle this)
 
-        # Fetch current spread
-        tick = mt5.symbol_info_tick(pos.symbol)
-        if tick is None:
-            logger.warning(f"Could not fetch tick data for {pos.symbol}, using entry price as BE SL without spread buffer.")
-            be_sl = entry_price
-        else:
-            spread = tick.ask - tick.bid
-            # Adjust SL to cover spread
-            if pos.type == mt5.ORDER_TYPE_BUY:
-                be_sl = entry_price + spread
-            elif pos.type == mt5.ORDER_TYPE_SELL:
-                be_sl = entry_price - spread
-            else:
-                be_sl = entry_price  # fallback
+        # Adjust entry price for spread and offset to get the final BE SL
+        # Note: For BE, we want SL = entry + spread + offset (SELL) or entry - spread - offset (BUY)
+        # The helper function _adjust_sl_for_spread_offset calculates SL = SL + spread + offset (SELL) or SL - spread - offset (BUY)
+        # So, we pass entry_price as the 'sl' parameter to the helper.
+        be_sl = self._adjust_sl_for_spread_offset(entry_price, pos.type, pos.symbol)
 
         logger.info(f"Attempting to modify SL to Breakeven adjusted for spread ({be_sl}) for position {ticket}")
 

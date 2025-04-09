@@ -563,7 +563,7 @@ async def process_update(analysis_result: dict, event, state_manager: StateManag
                 logger.info(f"{log_prefix} Re-analyzing edit/reply text specifically for update parameters...")
                 # Pass analysis_mode hint to analyzer
                 update_analysis_result = signal_analyzer.analyze(
-                    message_text, image_data, llm_context, analysis_mode='extract_update_params'
+                    message_text, image_data=None, context=llm_context, analysis_mode='extract_update_params'
                 )
                 logger.debug(f"{log_prefix} Re-analysis result for edit/reply: {update_analysis_result}")
 

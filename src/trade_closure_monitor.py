@@ -50,7 +50,14 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                             activation_msg += f"<b>Ticket:</b> <code>{ticket}</code>\n"
                             activation_msg += f"<b>Symbol:</b> <code>{trade.symbol}</code>\n"
                             activation_msg += f"<b>Entry Price:</b> <code>{pos_info.price_open}</code>\n"
-                            activation_msg += f"<b>Activated At:</b> {trade.open_time.strftime('%Y-%m-%d %I:%M:%S %p')}\n"
+                            if trade.open_time:
+                                if trade.open_time.tzinfo is None or trade.open_time.tzinfo.utcoffset(trade.open_time) is None:
+                                    open_time_local = TARGET_TIMEZONE.localize(trade.open_time)
+                                else:
+                                    open_time_local = trade.open_time.astimezone(TARGET_TIMEZONE)
+                                activation_msg += f"<b>Activated At:</b> {open_time_local.strftime('%Y-%m-%d %I:%M:%S %p')}\n"
+                            else:
+                                activation_msg += "<b>Activated At:</b> <i>N/A</i>\n"
                             original_msg_id = getattr(trade, 'original_msg_id', None)
                             await telegram_sender.send_message(activation_msg, parse_mode='html', reply_to=original_msg_id)
                             # Mark for AutoSL if applicable (now that it's active)
@@ -88,6 +95,7 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                         last_order_state = orders_sorted[0]
                         if last_order_state.state == mt5.ORDER_STATE_CANCELED:
                             is_canceled_pending = True
+                            # Assume MT5 time_done is UTC
                             close_time = datetime.fromtimestamp(last_order_state.time_done, tz=timezone.utc)
                             close_reason = "Canceled"
                             logger.info(f"[ClosureMonitor] Ticket {ticket} identified as CANCELED pending order.")
@@ -98,7 +106,13 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                             # Use trade_info.entry_price which holds the pending price for pending orders
                             pending_price_str = f"<code>{trade.entry_price}</code>" if trade.entry_price is not None else "<i>N/A</i>"
                             msg += f"<b>Pending Price:</b> {pending_price_str}\n"
-                            canceled_time_local = close_time.astimezone(TARGET_TIMEZONE) if close_time else None
+                            if close_time:
+                                if close_time.tzinfo is None or close_time.tzinfo.utcoffset(close_time) is None:
+                                    canceled_time_local = TARGET_TIMEZONE.localize(close_time)
+                                else:
+                                    canceled_time_local = close_time.astimezone(TARGET_TIMEZONE)
+                            else:
+                                canceled_time_local = None
                             canceled_time_str = canceled_time_local.strftime('%Y-%m-%d %I:%M:%S %p') if canceled_time_local else "<i>N/A</i>"
                             msg += f"<b>Canceled At:</b> {canceled_time_str}\n"
 
@@ -133,6 +147,7 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
 
                         profit = closing_deal.profit # Profit is directly from the deal
                         close_price = closing_deal.price
+                        # Assume MT5 deal.time is UTC
                         close_time = datetime.fromtimestamp(closing_deal.time, tz=timezone.utc)
 
                         # Determine reason based on the closing deal's reason code
@@ -176,6 +191,7 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                              orders_sorted = sorted(orders, key=lambda o: o.time_done, reverse=True)
                              last_order_state = orders_sorted[0]
                              # Use order time only if it seems valid (e.g., state is FILLED?)
+                             # Assume MT5 time_done is UTC
                              close_time = datetime.fromtimestamp(last_order_state.time_done, tz=timezone.utc)
                              close_reason = "Closed (No Deal Info)" # Set reason if no deal found
                              logger.info(f"[ClosureMonitor] Using order time_done {close_time} as close time for ticket {ticket}.")
@@ -222,7 +238,15 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                     profit_display = f"<code>{profit:.2f}</code>" if profit is not None else "<i>N/A</i>" # Check if profit was found
                     close_price_display = f"<code>{close_price}</code>" if close_price is not None else "<i>N/A</i>"
                     reason_display = safe_reason if safe_reason else "<i>Unknown</i>"
-                    close_time_local = close_time.astimezone(TARGET_TIMEZONE) if close_time else None
+                    if close_time:
+                        if close_time.tzinfo is None or close_time.tzinfo.utcoffset(close_time) is None:
+                            # Naive datetime, localize without conversion
+                            close_time_local = TARGET_TIMEZONE.localize(close_time)
+                        else:
+                            # Aware datetime, convert timezone
+                            close_time_local = close_time.astimezone(TARGET_TIMEZONE)
+                    else:
+                        close_time_local = None
                     close_time_display = close_time_local.strftime('%Y-%m-%d %I:%M:%S %p') if close_time_local else "<i>N/A</i>"
                     pips_display = f"<code>{pips:.1f}</code>" if close_price is not None and trade.entry_price is not None else "<i>N/A</i>"
                     entry_price_display = f"<code>{trade.entry_price}</code>" if trade.entry_price is not None else "<i>N/A</i>"

@@ -468,7 +468,7 @@ class TelegramSender:
                 answer_text = "This confirmation request has expired."
                 alert_answer = True
                 expiry_time_local = expiry_time.astimezone(TARGET_TIMEZONE) if expiry_time else None
-                expiry_time_str = expiry_time_local.strftime('%Y-%m-%d %H:%M:%S %Z') if expiry_time_local else "<i>N/A</i>"
+                expiry_time_str = expiry_time_local.strftime('%Y-%m-%d %I:%M:%S %p') if expiry_time_local else "<i>N/A</i>"
                 # Construct Expired message
                 final_message_text = f"""⏳ <b>Confirmation Expired</b> <code>[OrigMsgID: {original_signal_msg_id}]</code>
 

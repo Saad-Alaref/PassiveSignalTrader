@@ -50,7 +50,7 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                             activation_msg += f"<b>Ticket:</b> <code>{ticket}</code>\n"
                             activation_msg += f"<b>Symbol:</b> <code>{trade.symbol}</code>\n"
                             activation_msg += f"<b>Entry Price:</b> <code>{pos_info.price_open}</code>\n"
-                            activation_msg += f"<b>Activated At:</b> {trade.open_time.strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
+                            activation_msg += f"<b>Activated At:</b> {trade.open_time.strftime('%Y-%m-%d %I:%M:%S %p')}\n"
                             original_msg_id = getattr(trade, 'original_msg_id', None)
                             await telegram_sender.send_message(activation_msg, parse_mode='html', reply_to=original_msg_id)
                             # Mark for AutoSL if applicable (now that it's active)
@@ -99,7 +99,7 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                             pending_price_str = f"<code>{trade.entry_price}</code>" if trade.entry_price is not None else "<i>N/A</i>"
                             msg += f"<b>Pending Price:</b> {pending_price_str}\n"
                             canceled_time_local = close_time.astimezone(TARGET_TIMEZONE) if close_time else None
-                            canceled_time_str = canceled_time_local.strftime('%Y-%m-%d %H:%M:%S %Z') if canceled_time_local else "<i>N/A</i>"
+                            canceled_time_str = canceled_time_local.strftime('%Y-%m-%d %I:%M:%S %p') if canceled_time_local else "<i>N/A</i>"
                             msg += f"<b>Canceled At:</b> {canceled_time_str}\n"
 
                             original_msg_id = getattr(trade, 'original_msg_id', None)
@@ -223,7 +223,7 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                     close_price_display = f"<code>{close_price}</code>" if close_price is not None else "<i>N/A</i>"
                     reason_display = safe_reason if safe_reason else "<i>Unknown</i>"
                     close_time_local = close_time.astimezone(TARGET_TIMEZONE) if close_time else None
-                    close_time_display = close_time_local.strftime('%Y-%m-%d %H:%M:%S %Z') if close_time_local else "<i>N/A</i>"
+                    close_time_display = close_time_local.strftime('%Y-%m-%d %I:%M:%S %p') if close_time_local else "<i>N/A</i>"
                     pips_display = f"<code>{pips:.1f}</code>" if close_price is not None and trade.entry_price is not None else "<i>N/A</i>"
                     entry_price_display = f"<code>{trade.entry_price}</code>" if trade.entry_price is not None else "<i>N/A</i>"
 

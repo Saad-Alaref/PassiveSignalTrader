@@ -1,6 +1,6 @@
 import asyncio
 import MetaTrader5 as mt5
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import logging
 import pytz # Add pytz import
 
@@ -78,10 +78,9 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                     is_canceled_pending = False
 
                     # --- Check Order History First for Cancellation ---
-                    from datetime import datetime, timezone, timedelta # Ensure import
-                    from_time = datetime.now(timezone.utc) - timedelta(days=7) # Check last 7 days
+                    from_time = datetime.now(timezone.utc) - timedelta(days=7)  # Check last 7 days
                     to_time = datetime.now(timezone.utc) + timedelta(days=1)
-                    orders = mt5.history_orders_get(ticket=ticket) # Fetch specific order by ticket
+                    orders = mt5.history_orders_get(from_time, to_time, ticket=ticket)  # Fetch specific order by ticket within time window
 
                     if orders:
                         # Sort by time_done descending to get the latest state
@@ -99,7 +98,9 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                             # Use trade_info.entry_price which holds the pending price for pending orders
                             pending_price_str = f"<code>{trade.entry_price}</code>" if trade.entry_price is not None else "<i>N/A</i>"
                             msg += f"<b>Pending Price:</b> {pending_price_str}\n"
-                            msg += f"<b>Canceled At:</b> {close_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                            canceled_time_local = close_time.astimezone(TARGET_TIMEZONE) if close_time else None
+                            canceled_time_str = canceled_time_local.strftime('%Y-%m-%d %H:%M:%S %Z') if canceled_time_local else "<i>N/A</i>"
+                            msg += f"<b>Canceled At:</b> {canceled_time_str}\n"
 
                             original_msg_id = getattr(trade, 'original_msg_id', None)
                             await telegram_sender.send_message(msg, parse_mode='html', reply_to=original_msg_id)

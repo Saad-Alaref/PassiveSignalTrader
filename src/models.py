@@ -55,6 +55,7 @@ class TradeInfo:
     next_tp_index: int = 0 # Primarily relevant for the old partial close strategy
     sequence_info: Optional[str] = None # e.g., "Seq 1/3", "Dist 2/5"
     auto_sl_pending_timestamp: Optional[TimestampType] = None
+    auto_be_applied: bool = False
 
 # Potentially add PendingConfirmationData later if needed
 # @dataclass

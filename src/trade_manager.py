@@ -154,6 +154,11 @@ class TradeManager:
         if not enable_auto_be:
             return # Feature disabled
 
+        if trade_info.auto_be_applied:
+            logger.debug(f"{log_prefix_auto_be} AutoBE already applied. Skipping.")
+            return
+            return # Feature disabled
+
         profit_threshold_config = self.config_service.getfloat('AutoBE', 'auto_be_profit_usd', fallback=3.0) # Use service
         base_lot_size = self.config_service.getfloat('Trading', 'base_lot_size_for_usd_targets', fallback=0.01) # Use service
 
@@ -205,6 +210,7 @@ class TradeManager:
 
         if modify_success:
             logger.info(f"{log_prefix_auto_be} Successfully moved SL to Breakeven: {entry_price}")
+            trade_info.auto_be_applied = True
             # Send notifications
             entry_price_str = f"@{entry_price}"
             status_msg_auto_be = f"🛡️ <b>Auto Breakeven Applied</b>\n<b>Ticket:</b> <code>{ticket}</code> (Entry: {entry_price_str})\n<b>New SL:</b> <code>{entry_price}</code> (Profit Trigger: ≥ ${adjusted_be_threshold:.2f})"

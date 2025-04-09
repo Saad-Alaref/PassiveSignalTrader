@@ -98,7 +98,6 @@ async def _run_pre_execution_checks(
 
     if is_market_order and cooldown_enabled and state_manager.is_market_cooldown_active(cooldown_seconds):
         logger.warning(f"{log_prefix} Market order cooldown active. Trade Aborted.")
-        from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
         remaining_seconds = cooldown_seconds
         if state_manager.last_market_execution_time:
@@ -270,6 +269,34 @@ async def process_new_signal(signal_data: SignalData, message_id, state_manager:
                         logger.error(f"{log_prefix} Cannot calculate AutoTP for market order: Failed to get current tick for {trade_symbol}.")
                 else: # Pending Order
                     calc_entry_price = exec_price # Use the calculated pending entry price
+
+                # --- Adjust entry price with spread and offset ---
+                spread = 0.0
+                direction_str = 'BUY' if determined_order_type == mt5.ORDER_TYPE_BUY else 'SELL'
+                tick_for_spread = None
+
+                if determined_order_type in [mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL]:
+                    # For market orders, tick was already fetched
+                    tick_for_spread = tick
+                else:
+                    # For pending orders, fetch fresh tick to get spread
+                    tick_for_spread = mt5_fetcher.get_symbol_tick(trade_symbol)
+
+                if tick_for_spread and tick_for_spread.ask and tick_for_spread.bid:
+                    spread = abs(tick_for_spread.ask - tick_for_spread.bid)
+                else:
+                    spread = 0.0  # fallback if tick unavailable
+
+                try:
+                    adjusted_entry_price = trade_calculator.calculate_adjusted_entry_price(
+                        calc_entry_price,
+                        direction_str,
+                        spread
+                    )
+                    logger.info(f"{log_prefix} Adjusted entry price with spread ({spread}) and offset: {adjusted_entry_price}")
+                    calc_entry_price = adjusted_entry_price
+                except Exception as e:
+                    logger.warning(f"{log_prefix} Failed to adjust entry price: {e}. Using original price.")
 
                 if calc_entry_price is not None:
                     auto_tp_price = trade_calculator.calculate_tp_from_distance(
@@ -600,6 +627,8 @@ async def process_update(analysis_result: dict, event, state_manager: StateManag
                     # This is a basic heuristic, might need refinement
                     other_keywords = ["close", "cancel", "be", "breakeven", "entry"]
                     contains_other_keywords = any(keyword in message_text.lower() for keyword in other_keywords)
+                    
+                    update_analysis_result = None # Initialize to avoid UnboundLocalError
 
                     if (sl_changed or tps_changed) and not contains_other_keywords:
                         logger.info(f"{log_prefix} Heuristic detected simple SL/TP edit. Bypassing LLM re-analysis.")

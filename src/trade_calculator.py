@@ -234,6 +234,29 @@ class TradeCalculator:
         logger.info(f"{log_prefix} Calculated TP for {symbol} {order_type}: Entry={entry_price}, Distance={tp_distance_price:.{digits}f} -> TP Price={tp_price_rounded}")
         return tp_price_rounded
 
+    def calculate_adjusted_entry_price(self, original_price: float, direction: str, spread: float) -> float:
+        """
+        Calculates the adjusted entry price based on direction, spread, and configured offset.
+
+        Args:
+            original_price (float): The signal's original entry price.
+            direction (str): 'BUY' or 'SELL'.
+            spread (float): The current spread in price units.
+
+        Returns:
+            float: The adjusted entry price.
+        """
+        offset_pips = self.config_service.get_entry_price_offset()
+        # Convert pips to price units (10 pips = 1 USD, so 1 pip = 0.1 USD)
+        offset_price_units = offset_pips * 0.1
+
+        if direction.upper() == 'BUY':
+            return original_price + spread + offset_price_units
+        elif direction.upper() == 'SELL':
+            return original_price - spread - offset_price_units
+        else:
+            raise ValueError(f"Invalid trade direction: {direction}")
+
     def calculate_trailing_sl_price(self, symbol: str, order_type: int, current_price: float, trail_distance_price: float):
         """
         Calculates the Trailing Stop Loss price based on the current market price

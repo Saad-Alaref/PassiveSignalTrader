@@ -59,22 +59,21 @@ class DecisionLogic:
             logger.info("Decision: Pending order signal identified. Applying weighted logic.")
             signal_price_raw = signal_data.entry_price # Use attribute access
             sentiment_score = signal_data.sentiment_score if signal_data.sentiment_score is not None else 0.0 # Use attribute access, default
-
-            # Validate signal price
+                # Validate signal price
+            signal_price = None  # Initialize to avoid UnboundLocalError
             try:
-                # Handle potential range string if not handled by analyzer (should be handled there now)
-                if isinstance(signal_price_raw, str) and '-' in signal_price_raw:
-                     # This path should ideally not be reached if analyzer processes ranges
-                     logger.warning(f"Decision logic received entry price range '{signal_price_raw}'. Using midpoint for check.")
-                     low_str, high_str = signal_price_raw.split('-', 1)
-                     signal_price = (float(low_str.strip()) + float(high_str.strip())) / 2.0
-                elif isinstance(signal_price_raw, str): # Handle "N/A" or other non-numeric strings
-                     raise ValueError(f"Invalid non-numeric price string: {signal_price_raw}")
-                else: # Should be float or None
-                     signal_price = float(signal_price_raw) # Convert potential None to error if needed
+                if isinstance(signal_price_raw, str):
+                    if '-' in signal_price_raw: # Handle range string
+                        logger.warning(f"Decision logic received entry price range '{signal_price_raw}'. Using midpoint for check.")
+                        low_str, high_str = signal_price_raw.split('-', 1)
+                        signal_price = (float(low_str.strip()) + float(high_str.strip())) / 2.0
+                    else: # Handle simple numeric string like '3095'
+                        signal_price = float(signal_price_raw)
+                elif signal_price_raw is None: # Handle None explicitly
+                     raise ValueError("Entry price is None")
+                else: # Assume it's already a float/int
+                    signal_price = float(signal_price_raw) # Convert just in case
 
-            except (ValueError, TypeError):
-                 logger.error(f"Invalid or missing entry price for pending order: {signal_price_raw}")
             except (ValueError, TypeError):
                 logger.error(f"Invalid or missing entry price for pending order: {signal_price_raw}")
                 return False, "Invalid entry price", None
@@ -87,19 +86,19 @@ class DecisionLogic:
 
             # B. LLM Sentiment Score (Conditional)
             # --- Read config values dynamically ---
-            use_sentiment = self.config_service.getboolean('DecisionLogic', 'use_sentiment_analysis', fallback=True) # Use service
-            sentiment_weight = self.config_service.getfloat('DecisionLogic', 'sentiment_weight', fallback=0.5) # Use service
-            price_action_weight = self.config_service.getfloat('DecisionLogic', 'price_action_weight', fallback=0.5) # Use service
-            approval_threshold = self.config_service.getfloat('DecisionLogic', 'approval_threshold', fallback=0.6) # Use service
+            use_sentiment = self.config_service.getboolean('DecisionLogic', 'use_sentiment_analysis', fallback=True)  # Use service
+            sentiment_weight = self.config_service.getfloat('DecisionLogic', 'sentiment_weight', fallback=0.5)  # Use service
+            price_action_weight = self.config_service.getfloat('DecisionLogic', 'price_action_weight', fallback=0.5)  # Use service
+            approval_threshold = self.config_service.getfloat('DecisionLogic', 'approval_threshold', fallback=0.6)  # Use service
 
             # Adjust weights if sentiment is disabled
             if not use_sentiment:
-                 price_action_weight = 1.0
-                 sentiment_weight = 0.0 # Ensure sentiment term becomes zero
+                price_action_weight = 1.0
+                sentiment_weight = 0.0  # Ensure sentiment term becomes zero
 
             # --- End Read config values ---
 
-            normalized_sentiment_score = 0.0 # Default if sentiment is disabled
+            normalized_sentiment_score = 0.0  # Default if sentiment is disabled
             sentiment_log_str = "Disabled"
             if use_sentiment:
                 # Clamp sentiment score to [-1.0, 1.0] before normalizing
@@ -109,8 +108,7 @@ class DecisionLogic:
                 sentiment_log_str = f"{normalized_sentiment_score:.2f} (Raw: {sentiment_score})"
                 logger.debug(f"LLM Sentiment: Raw={sentiment_score}, Normalized={normalized_sentiment_score:.2f}")
             else:
-                 logger.debug("LLM Sentiment: Skipped (disabled in config)")
-
+                logger.debug("LLM Sentiment: Skipped (disabled in config)")
 
             # C. Combined Decision
             # Note: If sentiment is disabled, self.sentiment_weight is 0, so the term becomes zero.

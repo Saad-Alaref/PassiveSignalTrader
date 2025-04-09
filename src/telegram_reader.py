@@ -7,6 +7,7 @@ from telethon.sessions import StringSession
 from src.config_service import config_service
 import sys
 import getpass # For password input if needed
+from datetime import datetime
 logger = logging.getLogger('TradeBot')
 
 # Note: Removed the raw_update_handler as it's no longer needed for this approach
@@ -206,7 +207,6 @@ class TelegramReader:
 if __name__ == '__main__':
     # ... (imports for test) ...
     import os
-    from datetime import datetime
     from src.logger_setup import setup_logging
     from logger_setup import setup_logging
     from config_service import ConfigService # Import service for testing
@@ -226,7 +226,8 @@ if __name__ == '__main__':
 
 
     async def test_message_handler(event):
-        print(f"[{datetime.now()}] Received Event: ID={event.id}, Text='{event.text[:50]}...'")
+        preview = (event.text[:50] + '...') if isinstance(event.text, str) else 'No Text'
+        print(f"[{datetime.now()}] Received Event: ID={event.id}, Text='{preview}'")
         pass
 
 

@@ -206,8 +206,42 @@ class TradeManager:
         # --- Conditions met: Apply Auto BE ---
         logger.info(f"{log_prefix_auto_be} Profit {current_profit:.2f} >= Adjusted Threshold {adjusted_be_threshold:.2f}. Attempting to move SL to Breakeven ({entry_price}).")
 
-        # Adjust BE SL for spread + offset
-        be_sl = self.mt5_executor._adjust_sl_for_spread_offset(entry_price, trade_type, position.symbol)
+        # Calculate BE SL directly, accounting for spread and offset
+        symbol_info = self.mt5_fetcher.get_symbol_info(position.symbol)
+        point = symbol_info.point if symbol_info else 0.00001 # Default point size if info fails
+        digits = symbol_info.digits if symbol_info else 5 # Default digits if info fails
+        sl_offset_pips = self.config_service.getfloat('Trading', 'sl_offset_pips', fallback=0.0)
+        offset_price = round(sl_offset_pips * (point * 10), digits) # Assuming 1 pip = 10 points for offset config
+
+        tick = self.mt5_fetcher.get_symbol_tick(position.symbol)
+        spread = 0.0
+        if tick and tick.ask > 0 and tick.bid > 0: # Ensure valid tick data
+            spread = round(tick.ask - tick.bid, digits)
+        else:
+            logger.warning(f"{log_prefix_auto_be} Could not get valid tick for spread calculation. Using offset only for BE SL.")
+
+        be_sl = None
+        if trade_type == mt5.ORDER_TYPE_BUY:
+            # For BUY, BE SL should be slightly ABOVE entry
+            be_sl = round(entry_price + spread + offset_price, digits)
+            logger.debug(f"{log_prefix_auto_be} Calculating BUY BE SL: Entry={entry_price}, Spread={spread}, Offset={offset_price} -> BE_SL={be_sl}")
+        elif trade_type == mt5.ORDER_TYPE_SELL:
+            # For SELL, BE SL should be slightly BELOW entry
+            be_sl = round(entry_price - spread - offset_price, digits)
+            logger.debug(f"{log_prefix_auto_be} Calculating SELL BE SL: Entry={entry_price}, Spread={spread}, Offset={offset_price} -> BE_SL={be_sl}")
+        else:
+            logger.error(f"{log_prefix_auto_be} Unknown trade type {trade_type}. Cannot calculate BE SL.")
+            return # Abort if type is unknown
+
+        # Sanity check: Ensure BE SL is actually better than entry after adjustments
+        if (trade_type == mt5.ORDER_TYPE_BUY and be_sl <= entry_price) or \
+           (trade_type == mt5.ORDER_TYPE_SELL and be_sl >= entry_price):
+            logger.warning(f"{log_prefix_auto_be} Calculated BE SL ({be_sl}) is not better than entry ({entry_price}) after spread/offset. Setting SL exactly to entry price as fallback.")
+            be_sl = entry_price # Fallback to exact entry if adjustment goes wrong way
+
+        if be_sl is None: # Should not happen if type check passed, but safety check
+             logger.error(f"{log_prefix_auto_be} Failed to determine valid BE SL price. Aborting AutoBE.")
+             return
 
         modify_success = self.mt5_executor.modify_trade(ticket=ticket, sl=be_sl)
 

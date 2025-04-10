@@ -243,7 +243,19 @@ class DistributedLimitsStrategy(ExecutionStrategy):
 
             # Determine TP
             tp_index = min(i, len(self.numeric_tps) - 1)
-            current_exec_tp = self.numeric_tps[tp_index]
+
+            # Partial TP-Free Mode logic
+            partial_tp_free_mode = False
+            try:
+                partial_tp_free_mode = self.config_service.getboolean('Strategy', 'partial_tp_free_mode_enabled', fallback=False)
+            except:
+                pass
+
+            if partial_tp_free_mode and i >= 1:
+                current_exec_tp = None
+            else:
+                current_exec_tp = self.numeric_tps[tp_index]
+
             trade_comment = f"TB SigID {self.message_id} Dist {i+1}/{total_trades_to_open}"
 
             logger.info(f"{self.log_prefix} Placing pending limit order {i+1}/{total_trades_to_open}: Type={limit_order_type}, Vol={current_vol}, Entry={adjusted_entry_price} (Orig: {current_entry_price}), TP={current_exec_tp}")

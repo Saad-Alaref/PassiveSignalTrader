@@ -206,7 +206,10 @@ class TradeManager:
         # --- Conditions met: Apply Auto BE ---
         logger.info(f"{log_prefix_auto_be} Profit {current_profit:.2f} >= Adjusted Threshold {adjusted_be_threshold:.2f}. Attempting to move SL to Breakeven ({entry_price}).")
 
-        modify_success = self.mt5_executor.modify_sl_to_breakeven(ticket=ticket)
+        # Adjust BE SL for spread + offset
+        be_sl = self.mt5_executor._adjust_sl_for_spread_offset(entry_price, trade_type, position.symbol)
+
+        modify_success = self.mt5_executor.modify_trade(ticket=ticket, sl=be_sl)
 
         if modify_success:
             logger.info(f"{log_prefix_auto_be} Successfully moved SL to Breakeven: {entry_price}")
@@ -308,9 +311,12 @@ class TradeManager:
                 # --- Sanity Check: Ensure initial TSL locks in *some* profit ---
                 # (i.e., SL is better than entry price)
                 initial_tsl_locks_profit = False
-                if trade_type == mt5.ORDER_TYPE_BUY and new_tsl_price > entry_price:
+                # Adjust trailing SL for spread + offset relative to entry price
+                adjusted_entry_sl = self.mt5_executor._adjust_sl_for_spread_offset(entry_price, trade_type, symbol)
+
+                if trade_type == mt5.ORDER_TYPE_BUY and new_tsl_price > adjusted_entry_sl:
                     initial_tsl_locks_profit = True
-                elif trade_type == mt5.ORDER_TYPE_SELL and new_tsl_price < entry_price:
+                elif trade_type == mt5.ORDER_TYPE_SELL and new_tsl_price < adjusted_entry_sl:
                     initial_tsl_locks_profit = True
 
                 if not initial_tsl_locks_profit:
@@ -373,9 +379,12 @@ class TradeManager:
             if current_sl is None or current_sl == 0.0:
                 # If there's no current SL (shouldn't happen if TSL is active, but handle defensively),
                 # apply the new TSL only if it locks profit.
-                if trade_type == mt5.ORDER_TYPE_BUY and new_tsl_price > entry_price:
+                # Adjust trailing SL for spread + offset relative to entry price
+                adjusted_entry_sl = self.mt5_executor._adjust_sl_for_spread_offset(entry_price, trade_type, symbol)
+
+                if trade_type == mt5.ORDER_TYPE_BUY and new_tsl_price > adjusted_entry_sl:
                     move_sl = True
-                elif trade_type == mt5.ORDER_TYPE_SELL and new_tsl_price < entry_price:
+                elif trade_type == mt5.ORDER_TYPE_SELL and new_tsl_price < adjusted_entry_sl:
                     move_sl = True
                 if move_sl: logger.warning(f"{log_prefix_tsl} TSL active but current SL is missing. Applying new TSL {new_tsl_price}.")
             else:

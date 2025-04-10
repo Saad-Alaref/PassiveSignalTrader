@@ -24,7 +24,9 @@ def test_market_buy_signal(signal_analyzer, mock_llm):
         "is_signal": True
     }
     result = signal_analyzer.analyze("Buy XAUUSD now", image_data=None)
-    assert result.get("action") == "buy"
-    assert result.get("entry_type") == "Market"
+    # The analyze() method returns {'data': SignalData(...), 'type': 'new_signal'}
+    assert result.get("type") == "new_signal"
+    assert result.get("data").action.lower() == "buy"
+    assert result.get("data").entry_type == "Market"
 
 # (rest of tests unchanged)

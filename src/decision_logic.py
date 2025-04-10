@@ -145,6 +145,12 @@ class DecisionLogic:
                    - str: Reason for the score (e.g., "Determined BUY_LIMIT", "Failed to get market price").
                    - int or None: The determined MT5 order type constant, or None.
         """
+        # Reject unrealistic prices
+        if signal_price is None or signal_price <= 0 or signal_price > 1e6:
+            reason = f"Unrealistic signal price: {signal_price}"
+            logger.warning(reason)
+            return 0.0, reason, None
+
         # Read symbol dynamically
         mt5_symbol = self.config_service.get('MT5', 'symbol', fallback='XAUUSD') # Use service
         logger.debug(f"Performing price action check for {action} @ {signal_price} on symbol {mt5_symbol}")

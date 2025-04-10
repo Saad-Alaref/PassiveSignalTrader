@@ -115,27 +115,38 @@ class DistributedLimitsStrategy(ExecutionStrategy):
 
         logger.info(f"{self.log_prefix} Calculated Trades: {num_full_trades} x {self.base_split_lot}, Remainder: {remainder_lot}. Total: {total_trades_to_open}. Range: {low_price}-{high_price}")
 
-        # Calculate price step
-        price_step = 0.0
-        current_entry_price_single = None # For the case total_trades_to_open == 1
-        if total_trades_to_open == 1:
-            logger.info(f"{self.log_prefix} Only one trade to open, placing at the edge based on action.")
-            current_entry_price_single = high_price if self.action == "BUY" else low_price
-            price_step = 0.0
-        elif total_trades_to_open > 1:
-            if high_price == low_price:
-                logger.warning(f"{self.log_prefix} Entry range has zero width ({low_price}-{high_price}). Placing all orders at {low_price}.")
-                price_step = 0.0
+        # Check if Entry Range Split Mode is enabled
+        split_mode_enabled = False
+        try:
+            split_mode_enabled = self.config_service.getboolean('Strategy', 'entry_range_split_mode_enabled', fallback=False)
+        except:
+            pass
+
+        split_points = []
+        if split_mode_enabled and total_trades_to_open >= 2:
+            logger.info(f"{self.log_prefix} Entry Range Split Mode enabled. Using custom split points.")
+            # Example: 2 trades -> upper and middle/lower
+            split_points = []
+            if total_trades_to_open == 2:
+                split_points = [high_price, (high_price + low_price) / 2]
             else:
-                price_step = (high_price - low_price) / (total_trades_to_open - 1)
-                logger.info(f"{self.log_prefix} Calculated price step for {total_trades_to_open} trades: {price_step}")
-        elif total_trades_to_open > 1:
-            if high_price == low_price:
-                 logger.warning(f"{self.log_prefix} Entry range has zero width ({low_price}-{high_price}). Placing all orders at {low_price}.")
-                 price_step = 0.0
+                # For more than 2, distribute: upper, middle(s), lower
+                split_points.append(high_price)
+                for i in range(1, total_trades_to_open -1):
+                    ratio = i / (total_trades_to_open -1)
+                    split_points.append(high_price - ratio * (high_price - low_price))
+                split_points.append(low_price)
+        else:
+            # Default distributed mode
+            split_points = []
+            if total_trades_to_open == 1:
+                split_points = [high_price if self.action == "BUY" else low_price]
             else:
-                 price_step = (high_price - low_price) / (total_trades_to_open - 1)
-                 logger.info(f"{self.log_prefix} Calculated price step for {total_trades_to_open} trades: {price_step}")
+                for i in range(total_trades_to_open):
+                    if self.action == "BUY":
+                        split_points.append(high_price - i * (high_price - low_price) / (total_trades_to_open -1))
+                    else:
+                        split_points.append(low_price + i * (high_price - low_price) / (total_trades_to_open -1))
 
         executed_tickets_info = []
         failed_trades = 0
@@ -146,15 +157,7 @@ class DistributedLimitsStrategy(ExecutionStrategy):
         # --- Place Pending Limit Orders ---
         for i in range(total_trades_to_open):
             current_vol = self.base_split_lot if i < num_full_trades else remainder_lot
-            # Calculate entry price for this order
-            if total_trades_to_open == 1:
-                 current_entry_price = current_entry_price_single
-            elif limit_order_type == mt5.ORDER_TYPE_BUY_LIMIT:
-                current_entry_price = high_price - (i * price_step)
-            else: # SELL_LIMIT
-                current_entry_price = low_price + (i * price_step)
-
-            current_entry_price = round(current_entry_price, self.digits)
+            current_entry_price = round(split_points[i], self.digits)
 
             # --- Adjust Entry Price for Spread ---
             adjusted_entry_price = current_entry_price # Default to original
@@ -166,8 +169,6 @@ class DistributedLimitsStrategy(ExecutionStrategy):
                         adjusted_entry_price = round(current_entry_price + spread, self.digits)
                     elif limit_order_type == mt5.ORDER_TYPE_SELL_LIMIT: # Sell Limit: Entry = Signal - Spread
                         adjusted_entry_price = round(current_entry_price - spread, self.digits)
-                    # Note: Stop orders might not need adjustment or need opposite adjustment depending on goal.
-                    # Keeping adjustment only for LIMIT orders for now to avoid missing fills.
                     if adjusted_entry_price != current_entry_price:
                          logger.info(f"{self.log_prefix} Adjusted entry for spread: Original={current_entry_price}, Spread={spread} -> Adjusted={adjusted_entry_price}")
                 else:
@@ -175,7 +176,6 @@ class DistributedLimitsStrategy(ExecutionStrategy):
             except Exception as e:
                 logger.error(f"{self.log_prefix} Error adjusting entry price for spread: {e}")
             # --- End Entry Price Adjustment ---
-
 
             # Determine TP
             tp_index = min(i, len(self.numeric_tps) - 1)
@@ -193,7 +193,6 @@ class DistributedLimitsStrategy(ExecutionStrategy):
 
             if trade_result and trade_result.retcode == mt5.TRADE_RETCODE_DONE:
                 ticket = trade_result.order
-                # Store the *adjusted* entry price used for the order
                 executed_tickets_info.append({'ticket': ticket, 'vol': current_vol, 'tp': current_exec_tp, 'entry': adjusted_entry_price})
                 successful_trades += 1
                 logger.info(f"{self.log_prefix} Pending limit order {i+1} placed successfully. Ticket: {ticket}")
@@ -218,14 +217,13 @@ class DistributedLimitsStrategy(ExecutionStrategy):
             adjusted_sl_display = '<i>None</i>'
             if self.exec_sl:
                 try:
-                    # Need the order type (limit_order_type was determined earlier)
                     adjusted_sl_val = self.mt5_executor._adjust_sl_for_spread_offset(
                         self.exec_sl, limit_order_type, self.trade_symbol
                     )
                     adjusted_sl_display = f"<code>{adjusted_sl_val}</code>"
                 except Exception as e:
                     logger.error(f"{self.log_prefix} Error calculating adjusted SL for display: {e}")
-                    adjusted_sl_display = f"<code>{self.exec_sl}</code> (Error adjusting)" # Show raw SL if adjustment fails
+                    adjusted_sl_display = f"<code>{self.exec_sl}</code> (Error adjusting)"
 
             status_message += f"<b>Stop Loss:</b> {adjusted_sl_display}\n"
             status_message += "<b>Pending Orders Placed:</b>\n"
@@ -241,6 +239,7 @@ class DistributedLimitsStrategy(ExecutionStrategy):
             logger.error(f"{self.log_prefix} All {total_trades_to_open} distributed pending orders failed placement.")
             self.duplicate_checker.add_processed_id(self.message_id)
             await self.telegram_sender.send_message(status_message, parse_mode='html')
+            if self.debug_channel_id: await self.telegram_sender.send_message(f"❌ {self.log_prefix} All distributed pending orders failed.\n{status_message}", target_chat_id=self.debug_channel_id, parse_mode='html')
             if self.debug_channel_id: await self.telegram_sender.send_message(f"❌ {self.log_prefix} All distributed pending orders failed.\n{status_message}", target_chat_id=self.debug_channel_id, parse_mode='html')
 
 
@@ -262,6 +261,13 @@ class MultiMarketStopStrategy(ExecutionStrategy):
         total_trades_to_open = num_full_trades + (1 if remainder_lot > 0 else 0)
         logger.info(f"{self.log_prefix} Calculated Trades: {num_full_trades} x {self.base_split_lot} lots, Remainder: {remainder_lot} lots. Total: {total_trades_to_open}")
 
+        # Check if Partial TP-Free Mode is enabled
+        partial_tp_free_mode = False
+        try:
+            partial_tp_free_mode = self.config_service.getboolean('Strategy', 'partial_tp_free_mode_enabled', fallback=False)
+        except:
+            pass
+
         executed_tickets_info = []
         failed_trades = 0
         successful_trades = 0
@@ -271,6 +277,11 @@ class MultiMarketStopStrategy(ExecutionStrategy):
         for i in range(num_full_trades):
             tp_index = min(i, len(self.numeric_tps) - 1)
             current_exec_tp = self.numeric_tps[tp_index]
+
+            # Partial TP-Free Mode logic
+            if partial_tp_free_mode and i >= 1:
+                current_exec_tp = None
+
             trade_comment = f"TB SigID {self.message_id} Seq {i+1}/{total_trades_to_open}"
 
             logger.info(f"{self.log_prefix} Executing trade {i+1}/{total_trades_to_open}: Vol={self.base_split_lot}, TP={current_exec_tp}")
@@ -289,7 +300,7 @@ class MultiMarketStopStrategy(ExecutionStrategy):
                 final_entry_price = actual_exec_price if actual_exec_price is not None else self.exec_price
                 self._store_trade_info(
                     ticket=ticket, entry_price=final_entry_price, volume=self.base_split_lot,
-                    assigned_tp=current_exec_tp, is_pending=False, # Market/Stop orders are not pending once executed
+                    assigned_tp=current_exec_tp, is_pending=False,
                     sequence_info=f"Seq {i+1}/{total_trades_to_open}"
                 )
             else:
@@ -301,6 +312,11 @@ class MultiMarketStopStrategy(ExecutionStrategy):
         # --- Execute Remainder Lot Trade ---
         if remainder_lot > 0:
             current_exec_tp = self.numeric_tps[-1]
+
+            # Partial TP-Free Mode logic
+            if partial_tp_free_mode and num_full_trades >= 1:
+                current_exec_tp = None
+
             trade_comment = f"TB SigID {self.message_id} Seq {total_trades_to_open}/{total_trades_to_open} (Rem)"
             logger.info(f"{self.log_prefix} Executing remainder trade {total_trades_to_open}/{total_trades_to_open}: Vol={remainder_lot}, TP={current_exec_tp}")
             trade_result_tuple = self.mt5_executor.execute_trade(

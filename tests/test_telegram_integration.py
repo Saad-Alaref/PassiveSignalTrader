@@ -4,7 +4,13 @@ from src.telegram_sender import TelegramSender
 
 @pytest.fixture
 def telegram_sender():
-    sender = TelegramSender(MagicMock())
+    sender = TelegramSender(
+        MagicMock(),  # config_service
+        MagicMock(),  # state_manager
+        MagicMock(),  # mt5_executor
+        MagicMock(),  # mt5_connector
+        MagicMock()   # mt5_fetcher
+    )
     sender.send_message = AsyncMock(return_value=True)
     sender.send_confirmation_message = AsyncMock(return_value=True)
     sender.edit_message = AsyncMock(return_value=True)

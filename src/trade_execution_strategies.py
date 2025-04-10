@@ -18,7 +18,8 @@ class ExecutionStrategy(ABC):
     def __init__(self, action, trade_symbol, lot_size, exec_sl, numeric_tps,
                  message_id, config_service_instance, mt5_fetcher: MT5DataFetcher, mt5_executor: MT5Executor, # Use service instance
                  state_manager: StateManager, telegram_sender: TelegramSender,
-                 duplicate_checker: DuplicateChecker, log_prefix: str):
+                 duplicate_checker: DuplicateChecker, log_prefix: str,
+                 trade_calculator):
         self.action = action
         self.trade_symbol = trade_symbol
         self.lot_size = lot_size
@@ -32,6 +33,7 @@ class ExecutionStrategy(ABC):
         self.telegram_sender = telegram_sender
         self.duplicate_checker = duplicate_checker
         self.log_prefix = log_prefix
+        self.trade_calculator = trade_calculator
         self.debug_channel_id = getattr(telegram_sender, 'debug_target_channel_id', None)
         self.tp_strategy = self.config_service.get('Strategy', 'tp_execution_strategy', fallback='first_tp_full_close').lower() # Use service
 
@@ -222,23 +224,21 @@ class DistributedLimitsStrategy(ExecutionStrategy):
                 tick = self.mt5_fetcher.get_symbol_tick(self.trade_symbol)
                 if tick:
                     spread = round(tick.ask - tick.bid, self.digits)
-                    current_ask = tick.ask
-                    if limit_order_type == mt5.ORDER_TYPE_BUY_LIMIT:
-                        tentative_price = round(current_entry_price + spread, self.digits)
-                        # Cap adjusted price to just below current Ask to avoid invalid price
-                        if tentative_price >= current_ask:
-                            adjusted_entry_price = current_entry_price  # Skip adjustment
-                            logger.info(f"{self.log_prefix} Skipped spread adjustment for BUY LIMIT to avoid invalid price (Tentative: {tentative_price} >= Ask: {current_ask})")
-                        else:
-                            adjusted_entry_price = tentative_price
-                    elif limit_order_type == mt5.ORDER_TYPE_SELL_LIMIT:
-                        adjusted_entry_price = round(current_entry_price - spread, self.digits)
-                    if adjusted_entry_price != current_entry_price:
-                        logger.info(f"{self.log_prefix} Adjusted entry for spread: Original={current_entry_price}, Spread={spread} -> Adjusted={adjusted_entry_price}")
+                    # Use trade_calculator to adjust entry price with spread + offset
+                    try:
+                        adjusted_entry_price = self.trade_calculator.calculate_adjusted_entry_price(
+                            current_entry_price,
+                            self.action,
+                            spread
+                        )
+                        logger.info(f"{self.log_prefix} Adjusted entry for spread+offset: Original={current_entry_price}, Spread={spread} -> Adjusted={adjusted_entry_price}")
+                    except Exception as e:
+                        logger.error(f"{self.log_prefix} Error in trade_calculator.calculate_adjusted_entry_price: {e}")
+                        adjusted_entry_price = current_entry_price
                 else:
-                    logger.warning(f"{self.log_prefix} Could not get tick data to adjust entry price for spread.")
+                    logger.warning(f"{self.log_prefix} Could not get tick data to adjust entry price for spread and offset.")
             except Exception as e:
-                logger.error(f"{self.log_prefix} Error adjusting entry price for spread: {e}")
+                logger.error(f"{self.log_prefix} Error adjusting entry price for spread and offset: {e}")
             # --- End Entry Price Adjustment ---
 
             # Determine TP

@@ -1,6 +1,7 @@
 import asyncio
 import MetaTrader5 as mt5
-from datetime import datetime, timezone, timedelta
+import datetime as dt
+from datetime import timezone, timedelta
 import logging
 import pytz # Add pytz import
 
@@ -40,11 +41,11 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                         # Find the actual position info
                         pos_info = next((pos for pos in open_positions if pos.ticket == ticket), None)
                         if pos_info:
-                            logger.info(f"[ActivationMonitor] Pending order {ticket} activated! Entry: {pos_info.price_open}, Time: {datetime.fromtimestamp(pos_info.time, tz=timezone.utc)}")
+                            logger.info(f"[ActivationMonitor] Pending order {ticket} activated! Entry: {pos_info.price_open}, Time: {dt.datetime.fromtimestamp(pos_info.time, tz=timezone.utc)}")
                             # Update trade state in StateManager
                             trade.is_pending = False
                             trade.entry_price = pos_info.price_open # Update with actual entry price
-                            trade.open_time = datetime.fromtimestamp(pos_info.time, tz=timezone.utc) # Update with actual open time
+                            trade.open_time = dt.datetime.fromtimestamp(pos_info.time, tz=timezone.utc) # Update with actual open time
                             # Send Telegram notification
                             activation_msg = f"✅ <b>Pending Order Activated</b>\n"
                             activation_msg += f"<b>Ticket:</b> <code>{ticket}</code>\n"
@@ -85,8 +86,8 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                     is_canceled_pending = False
 
                     # --- Check Order History First for Cancellation ---
-                    from_time = datetime.now(timezone.utc) - timedelta(days=7)  # Check last 7 days
-                    to_time = datetime.now(timezone.utc) + timedelta(days=1)
+                    from_time = dt.datetime.now(timezone.utc) - timedelta(days=7)  # Check last 7 days
+                    to_time = dt.datetime.now(timezone.utc) + timedelta(days=1)
                     orders = mt5.history_orders_get(from_time, to_time, ticket=ticket)  # Fetch specific order by ticket within time window
 
                     if orders:
@@ -96,7 +97,7 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                         if last_order_state.state == mt5.ORDER_STATE_CANCELED:
                             is_canceled_pending = True
                             # Assume MT5 time_done is UTC
-                            close_time = datetime.fromtimestamp(last_order_state.time_done, tz=timezone.utc)
+                            close_time = dt.datetime.fromtimestamp(last_order_state.time_done, tz=timezone.utc)
                             close_reason = "Canceled"
                             logger.info(f"[ClosureMonitor] Ticket {ticket} identified as CANCELED pending order.")
                             # Format Canceled message

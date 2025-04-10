@@ -159,6 +159,40 @@ class DistributedLimitsStrategy(ExecutionStrategy):
             current_vol = self.base_split_lot if i < num_full_trades else remainder_lot
             current_entry_price = round(split_points[i], self.digits)
 
+            # Fetch current market prices
+            try:
+                tick = self.mt5_fetcher.get_symbol_tick(self.trade_symbol)
+                if tick:
+                    current_ask = tick.ask
+                    current_bid = tick.bid
+                    # Determine entry zone bounds
+                    zone_low = min(split_points)
+                    zone_high = max(split_points)
+                    # Check if current Ask is inside the entry zone
+                    if self.action == "BUY" and zone_low < current_ask < zone_high:
+                        logger.warning(f"{self.log_prefix} Current Ask {current_ask} is INSIDE entry zone ({zone_low}-{zone_high}). Skipping pending order placement to avoid invalid prices.")
+                        continue  # Skip this order
+                    if self.action == "SELL" and zone_low < current_bid < zone_high:
+                        logger.warning(f"{self.log_prefix} Current Bid {current_bid} is INSIDE entry zone ({zone_low}-{zone_high}). Skipping pending order placement to avoid invalid prices.")
+                        continue  # Skip this order
+                    # Else, determine order type dynamically
+                    if self.action == "BUY":
+                        if current_entry_price >= current_ask:
+                            limit_order_type = mt5.ORDER_TYPE_BUY_STOP
+                            logger.info(f"{self.log_prefix} Switching to BUY STOP for entry {current_entry_price} >= Ask {current_ask}")
+                        else:
+                            limit_order_type = mt5.ORDER_TYPE_BUY_LIMIT
+                    elif self.action == "SELL":
+                        if current_entry_price <= current_bid:
+                            limit_order_type = mt5.ORDER_TYPE_SELL_STOP
+                            logger.info(f"{self.log_prefix} Switching to SELL STOP for entry {current_entry_price} <= Bid {current_bid}")
+                        else:
+                            limit_order_type = mt5.ORDER_TYPE_SELL_LIMIT
+                else:
+                    logger.warning(f"{self.log_prefix} Could not get tick data to determine order type dynamically. Using default limit order type.")
+            except Exception as e:
+                logger.error(f"{self.log_prefix} Error determining order type dynamically: {e}")
+
             # Dynamically determine order type based on current market
             try:
                 tick = self.mt5_fetcher.get_symbol_tick(self.trade_symbol)
@@ -227,7 +261,7 @@ class DistributedLimitsStrategy(ExecutionStrategy):
                 successful_trades += 1
                 logger.info(f"{self.log_prefix} Pending limit order {i+1} placed successfully. Ticket: {ticket}")
                 self._store_trade_info(
-                    ticket=ticket, entry_price=current_entry_price, volume=current_vol,
+                    ticket=ticket, entry_price=adjusted_entry_price, volume=current_vol,
                     assigned_tp=current_exec_tp, is_pending=True,
                     sequence_info=f"Dist {i+1}/{total_trades_to_open}"
                 )

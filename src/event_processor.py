@@ -475,7 +475,8 @@ async def process_new_signal(signal_data: SignalData, message_id, state_manager:
             "exec_sl": exec_sl, "numeric_tps": numeric_tps, "message_id": message_id,
             "config_service_instance": config_service_instance, "mt5_fetcher": mt5_fetcher, "mt5_executor": mt5_executor, # Pass service instance
             "state_manager": state_manager, "telegram_sender": telegram_sender,
-            "duplicate_checker": duplicate_checker, "log_prefix": log_prefix
+            "duplicate_checker": duplicate_checker, "log_prefix": log_prefix,
+            "trade_calculator": trade_calculator
         }
 
         try:

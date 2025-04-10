@@ -3,3 +3,4 @@ Telethon
 google-generativeai
 Pillow
 pytz
+pytest

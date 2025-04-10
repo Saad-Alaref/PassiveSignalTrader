@@ -159,6 +159,29 @@ class DistributedLimitsStrategy(ExecutionStrategy):
             current_vol = self.base_split_lot if i < num_full_trades else remainder_lot
             current_entry_price = round(split_points[i], self.digits)
 
+            # Dynamically determine order type based on current market
+            try:
+                tick = self.mt5_fetcher.get_symbol_tick(self.trade_symbol)
+                if tick:
+                    current_ask = tick.ask
+                    current_bid = tick.bid
+                    if self.action == "BUY":
+                        if current_entry_price >= current_ask:
+                            limit_order_type = mt5.ORDER_TYPE_BUY_STOP
+                            logger.info(f"{self.log_prefix} Switching to BUY STOP for entry {current_entry_price} >= Ask {current_ask}")
+                        else:
+                            limit_order_type = mt5.ORDER_TYPE_BUY_LIMIT
+                    elif self.action == "SELL":
+                        if current_entry_price <= current_bid:
+                            limit_order_type = mt5.ORDER_TYPE_SELL_STOP
+                            logger.info(f"{self.log_prefix} Switching to SELL STOP for entry {current_entry_price} <= Bid {current_bid}")
+                        else:
+                            limit_order_type = mt5.ORDER_TYPE_SELL_LIMIT
+                else:
+                    logger.warning(f"{self.log_prefix} Could not get tick data to determine order type dynamically. Using default limit order type.")
+            except Exception as e:
+                logger.error(f"{self.log_prefix} Error determining order type dynamically: {e}")
+
             # --- Adjust Entry Price for Spread ---
             adjusted_entry_price = current_entry_price  # Default to original
             try:

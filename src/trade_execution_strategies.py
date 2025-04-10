@@ -160,17 +160,24 @@ class DistributedLimitsStrategy(ExecutionStrategy):
             current_entry_price = round(split_points[i], self.digits)
 
             # --- Adjust Entry Price for Spread ---
-            adjusted_entry_price = current_entry_price # Default to original
+            adjusted_entry_price = current_entry_price  # Default to original
             try:
                 tick = self.mt5_fetcher.get_symbol_tick(self.trade_symbol)
                 if tick:
                     spread = round(tick.ask - tick.bid, self.digits)
-                    if limit_order_type == mt5.ORDER_TYPE_BUY_LIMIT: # Buy Limit: Entry = Signal + Spread
-                        adjusted_entry_price = round(current_entry_price + spread, self.digits)
-                    elif limit_order_type == mt5.ORDER_TYPE_SELL_LIMIT: # Sell Limit: Entry = Signal - Spread
+                    current_ask = tick.ask
+                    if limit_order_type == mt5.ORDER_TYPE_BUY_LIMIT:
+                        tentative_price = round(current_entry_price + spread, self.digits)
+                        # Cap adjusted price to just below current Ask to avoid invalid price
+                        if tentative_price >= current_ask:
+                            adjusted_entry_price = current_entry_price  # Skip adjustment
+                            logger.info(f"{self.log_prefix} Skipped spread adjustment for BUY LIMIT to avoid invalid price (Tentative: {tentative_price} >= Ask: {current_ask})")
+                        else:
+                            adjusted_entry_price = tentative_price
+                    elif limit_order_type == mt5.ORDER_TYPE_SELL_LIMIT:
                         adjusted_entry_price = round(current_entry_price - spread, self.digits)
                     if adjusted_entry_price != current_entry_price:
-                         logger.info(f"{self.log_prefix} Adjusted entry for spread: Original={current_entry_price}, Spread={spread} -> Adjusted={adjusted_entry_price}")
+                        logger.info(f"{self.log_prefix} Adjusted entry for spread: Original={current_entry_price}, Spread={spread} -> Adjusted={adjusted_entry_price}")
                 else:
                     logger.warning(f"{self.log_prefix} Could not get tick data to adjust entry price for spread.")
             except Exception as e:

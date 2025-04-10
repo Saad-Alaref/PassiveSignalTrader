@@ -149,7 +149,7 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                         profit = closing_deal.profit # Profit is directly from the deal
                         close_price = closing_deal.price
                         # Assume MT5 deal.time is UTC
-                        close_time = datetime.fromtimestamp(closing_deal.time, tz=timezone.utc)
+                        close_time = dt.datetime.fromtimestamp(closing_deal.time, tz=timezone.utc)
 
                         # Determine reason based on the closing deal's reason code
                         reason_code = closing_deal.reason
@@ -193,7 +193,7 @@ async def periodic_trade_closure_monitor_task(state_manager, telegram_sender, mt
                              last_order_state = orders_sorted[0]
                              # Use order time only if it seems valid (e.g., state is FILLED?)
                              # Assume MT5 time_done is UTC
-                             close_time = datetime.fromtimestamp(last_order_state.time_done, tz=timezone.utc)
+                             close_time = dt.datetime.fromtimestamp(last_order_state.time_done, tz=timezone.utc)
                              close_reason = "Closed (No Deal Info)" # Set reason if no deal found
                              logger.info(f"[ClosureMonitor] Using order time_done {close_time} as close time for ticket {ticket}.")
                         # If time is still None, it will be handled during message formatting

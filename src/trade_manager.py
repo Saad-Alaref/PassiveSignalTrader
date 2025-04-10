@@ -151,13 +151,19 @@ class TradeManager:
         """
         # --- Read AutoBE config dynamically ---
         enable_auto_be = self.config_service.getboolean('AutoBE', 'enable_auto_be', fallback=False) # Use service
+        if not position or not trade_info:
+            logger.error("AutoBE check missing position or trade_info.")
+            return
+
+        ticket = position.ticket
+        log_prefix_auto_be = f"[AutoBE Check][Ticket: {ticket}]"
+
         if not enable_auto_be:
             return # Feature disabled
 
         if trade_info.auto_be_applied:
             logger.debug(f"{log_prefix_auto_be} AutoBE already applied. Skipping.")
             return
-            return # Feature disabled
 
         profit_threshold_config = self.config_service.getfloat('AutoBE', 'auto_be_profit_usd', fallback=3.0) # Use service
         base_lot_size = self.config_service.getfloat('Trading', 'base_lot_size_for_usd_targets', fallback=0.01) # Use service
@@ -170,16 +176,10 @@ class TradeManager:
              return
         # --- End Read AutoBE config ---
 
-        if not position or not trade_info:
-            logger.error("AutoBE check missing position or trade_info.")
-            return
-
-        ticket = position.ticket
         current_profit = position.profit
         current_sl = position.sl
         entry_price = position.price_open
         trade_type = position.type
-        log_prefix_auto_be = f"[AutoBE Check][Ticket: {ticket}]"
 
         # Calculate scaling factor and adjusted threshold
         scaling_factor = position.volume / base_lot_size

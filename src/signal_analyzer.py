@@ -81,9 +81,10 @@ class SignalAnalyzer:
         # Always use the main analysis prompt. The LLM should understand the context of an edit/reply.
         prompt_type_to_use = "analyze_signal"
 
+        # Ignore image_data, only analyze text
         llm_result = self.llm.analyze_message(
             message_text=message_text,
-            image_data=image_data,
+            image_data=None,
             context=context, # Pass context
             prompt_type=prompt_type_to_use # Pass determined prompt type
         )

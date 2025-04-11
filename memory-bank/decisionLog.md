@@ -50,3 +50,10 @@ This document records significant architectural and technical decisions, includi
 - **Decision:** If initial signal lacks SL/TP, wait for Telegram message edits or replies to update trade.
 - **Rationale:** Signal senders often update messages; bot should adapt.
 - **Implications:** Requires message state tracking and update handling.
+
+---
+
+### [2025-04-11 15:30:00] - Refactor Trailing Stop Loss to Use Pips
+- **Decision:** Changed TSL activation and trail distance from USD/price units to pips.
+- **Rationale:** Makes TSL behavior consistent across different trade volumes and simplifies configuration.
+- **Implications:** Updated `config.ini` keys (`activation_profit_pips`, `trail_distance_pips`), modified logic in `trade_manager.py` and `trade_calculator.py` to handle pip-based calculations. Requires users to update their config files.

@@ -274,19 +274,16 @@ class TradeManager:
         if not enable_tsl:
             return # Feature disabled
 
-        activation_profit_config = self.config_service.getfloat('TrailingStop', 'activation_profit_usd', fallback=10.0) # Use service
-        trail_distance_config = self.config_service.getfloat('TrailingStop', 'trail_distance_price', fallback=5.0) # Use service
-        base_lot_size = self.config_service.getfloat('Trading', 'base_lot_size_for_usd_targets', fallback=0.01) # Use service
+        activation_profit_pips_config = self.config_service.getfloat('TrailingStop', 'activation_profit_pips', fallback=60.0) # Use service (e.g., 60 pips)
+        trail_distance_pips_config = self.config_service.getfloat('TrailingStop', 'trail_distance_pips', fallback=20.0) # Use service (e.g., 20 pips)
+        # base_lot_size is no longer needed for TSL activation based on pips
 
-        if activation_profit_config <= 0 or trail_distance_config <= 0:
-            logger.warning("TrailingStop activation_profit_usd or trail_distance_usd is zero or negative. TSL disabled.")
+        if activation_profit_pips_config <= 0 or trail_distance_pips_config <= 0:
+            logger.warning("TrailingStop activation_profit_pips or trail_distance_pips is zero or negative. TSL disabled.")
             return
-        if base_lot_size <= 0:
-            logger.warning("Trading base_lot_size_for_usd_targets is zero or negative. Cannot scale TSL thresholds.")
-            return
-        if trail_distance_config >= activation_profit_config:
-            logger.warning("TrailingStop trail_distance_usd must be less than activation_profit_usd in config. TSL disabled.")
-            return
+        # Removed base_lot_size check as it's not used for pip-based activation
+        # Removed check comparing trail distance and activation profit as they are now in different units (pips vs pips)
+        # A check like trail_distance_pips >= activation_profit_pips could be added if desired.
         # --- End Read TrailingStop config ---
 
         if not position or not trade_info:
@@ -312,30 +309,41 @@ class TradeManager:
         # Price relevant for trailing: If BUY, trail below BID. If SELL, trail above ASK.
         relevant_market_price = tick.bid if trade_type == mt5.ORDER_TYPE_BUY else tick.ask
 
-        # Calculate scaling factor and adjusted thresholds
-        scaling_factor = position.volume / base_lot_size
-        adjusted_activation_threshold = activation_profit_config * scaling_factor
-        # NOTE: trail_distance_usd is now interpreted as price distance, scaling is removed here.
-        # The scaling now happens for the *activation threshold* only.
-        # adjusted_trail_distance = trail_distance_config * scaling_factor # Removed scaling for distance
-        trail_price_distance = trail_distance_config # Use the config value directly as price distance
-        logger.debug(f"{log_prefix_tsl} BaseLot={base_lot_size}, PosVol={position.volume}, ScaleFactor={scaling_factor:.2f}")
-        logger.debug(f"{log_prefix_tsl} ConfigActivation=${activation_profit_config:.2f}, AdjustedActivation=${adjusted_activation_threshold:.2f}")
-        logger.debug(f"{log_prefix_tsl} ConfigTrailDistance=${trail_distance_config:.2f}") # Log the direct distance
+        # Get symbol info for pip calculations
+        symbol_info = self.mt5_fetcher.get_symbol_info(symbol)
+        if not symbol_info:
+            logger.error(f"{log_prefix_tsl} Cannot get symbol info for {symbol}. Skipping TSL check.")
+            return
+        point = symbol_info.point
+        digits = symbol_info.digits
+
+        # Calculate activation distance in price units
+        activation_price_distance = round(activation_profit_pips_config * (point * 10), digits) # Assuming 1 pip = 10 points
+
+        logger.debug(f"{log_prefix_tsl} ConfigActivationPips={activation_profit_pips_config}, ActivationPriceDistance={activation_price_distance}")
+        logger.debug(f"{log_prefix_tsl} ConfigTrailDistancePips={trail_distance_pips_config}")
 
 
         # --- TSL Activation Logic ---
         if not tsl_active:
-            # Compare current profit with ADJUSTED activation threshold
-            if current_profit >= adjusted_activation_threshold:
-                logger.info(f"{log_prefix_tsl} Profit {current_profit:.2f} >= Adjusted Activation Threshold {adjusted_activation_threshold:.2f}. Attempting TSL activation...")
+            # Calculate current profit distance in price units
+            current_price_distance_profit = 0.0
+            if trade_type == mt5.ORDER_TYPE_BUY:
+                current_price_distance_profit = relevant_market_price - entry_price # Bid - Entry
+            elif trade_type == mt5.ORDER_TYPE_SELL:
+                current_price_distance_profit = entry_price - relevant_market_price # Entry - Ask
+
+            # Compare current price distance profit with activation price distance threshold
+            if current_price_distance_profit >= activation_price_distance:
+                logger.info(f"{log_prefix_tsl} Price Distance Profit {current_price_distance_profit:.{digits}f} >= Activation Distance {activation_price_distance:.{digits}f}. Attempting TSL activation...")
 
                 # Calculate initial TSL price based on current price and FIXED trail price distance
+                # Calculate initial TSL price based on current price and CONFIGURED trail pips distance
                 new_tsl_price = self.trade_calculator.calculate_trailing_sl_price(
                     symbol=symbol,
                     order_type=trade_type,
                     current_price=relevant_market_price, # Use Bid for BUY, Ask for SELL
-                    trail_distance_price=trail_price_distance # Use fixed distance
+                    trail_distance_pips=trail_distance_pips_config # Pass pips distance
                 )
 
                 if new_tsl_price is None:
@@ -379,8 +387,8 @@ class TradeManager:
                     trade_info.tsl_active = True # Use attribute access
 
                     # Send notifications
-                    entry_price_str = f"@{entry_price}"
-                    status_msg_tsl_act = f"📈 <b>Trailing Stop Activated</b>\n<b>Ticket:</b> <code>{ticket}</code> (Entry: {entry_price_str})\n<b>Initial SL:</b> <code>{new_tsl_price}</code> (Profit ≥ ${adjusted_activation_threshold:.2f}, Trail Distance: {trail_price_distance})"
+                    entry_price_str = f"@{entry_price:.{digits}f}"
+                    status_msg_tsl_act = f"📈 <b>Trailing Stop Activated</b>\n<b>Ticket:</b> <code>{ticket}</code> (Entry: {entry_price_str})\n<b>Initial SL:</b> <code>{new_tsl_price}</code> (Profit ≥ {activation_profit_pips_config} pips, Trail: {trail_distance_pips_config} pips)"
                     await self.telegram_sender.send_message(status_msg_tsl_act, parse_mode='html')
                     debug_channel_id = getattr(self.telegram_sender, 'debug_target_channel_id', None)
                     if debug_channel_id:
@@ -395,11 +403,12 @@ class TradeManager:
         # --- TSL Update Logic (if already active) ---
         elif tsl_active:
             # Calculate the new potential TSL price based on the current market price and FIXED trail price distance
+            # Calculate the new potential TSL price based on the current market price and CONFIGURED trail pips distance
             new_tsl_price = self.trade_calculator.calculate_trailing_sl_price(
                 symbol=symbol,
                 order_type=trade_type,
                 current_price=relevant_market_price, # Use Bid for BUY, Ask for SELL
-                trail_distance_price=trail_price_distance # Use fixed distance
+                trail_distance_pips=trail_distance_pips_config # Pass pips distance
             )
 
             if new_tsl_price is None:

@@ -257,24 +257,24 @@ class TradeCalculator:
         else:
             raise ValueError(f"Invalid trade direction: {direction}")
 
-    def calculate_trailing_sl_price(self, symbol: str, order_type: int, current_price: float, trail_distance_price: float):
+    def calculate_trailing_sl_price(self, symbol: str, order_type: int, current_price: float, trail_distance_pips: float):
         """
         Calculates the Trailing Stop Loss price based on the current market price
-        and a fixed price distance.
+        and a fixed distance in pips.
 
         Args:
             symbol (str): The trading symbol.
             order_type (int): mt5.ORDER_TYPE_BUY or mt5.ORDER_TYPE_SELL.
             current_price (float): The current relevant market price (Bid for BUY, Ask for SELL).
-            trail_distance_price (float): The desired distance behind the current price, in price units.
+            trail_distance_pips (float): The desired distance behind the current price, in pips.
 
         Returns:
             float or None: The calculated Trailing SL price, or None if calculation fails.
         """
-        log_prefix = f"[CalcTrailSL][{symbol}]" # Add log prefix
-        logger.debug(f"{log_prefix} Inputs: current_price={current_price}, distance={trail_distance_price}, order_type={order_type}")
-        if not symbol or not current_price or trail_distance_price <= 0:
-            logger.error("Invalid parameters for calculate_trailing_sl_price.")
+        log_prefix = f"[CalcTrailSL][{symbol}]"
+        logger.debug(f"{log_prefix} Inputs: current_price={current_price}, distance_pips={trail_distance_pips}, order_type={order_type}")
+        if not symbol or not current_price or trail_distance_pips <= 0:
+            logger.error("Invalid parameters for calculate_trailing_sl_price (pips).")
             return None
 
         symbol_info = self.fetcher.get_symbol_info(symbol)
@@ -282,10 +282,12 @@ class TradeCalculator:
             logger.error(f"{log_prefix} Cannot calculate Trailing SL: Failed to get symbol info for {symbol}.")
             return None
 
+        point = symbol_info.point
         digits = symbol_info.digits
-        # The trail_distance_price is already the value we need
-        sl_distance_price = abs(trail_distance_price) # Ensure positive distance
-        logger.debug(f"{log_prefix} Using direct price distance: {sl_distance_price}")
+
+        # Convert pips distance to price distance
+        sl_distance_price = round(abs(trail_distance_pips) * (point * 10), digits) # Assuming 1 pip = 10 points
+        logger.debug(f"{log_prefix} Converted {trail_distance_pips} pips to price distance: {sl_distance_price}")
 
         # Determine SL price based on order type and *current* price
         sl_price = None
@@ -302,7 +304,21 @@ class TradeCalculator:
         # Round the final SL price to the symbol's digits
         sl_price_rounded = round(sl_price, digits)
 
-        logger.info(f"{log_prefix} Calculated Trailing SL for {symbol} {order_type}: CurrentPrice={current_price}, Distance={sl_distance_price:.{digits}f} -> SL Price={sl_price_rounded}")
+        # Create the format specifier string safely
+        try:
+            price_format_specifier = f":.{int(digits)}f"
+        except (ValueError, TypeError):
+            logger.warning(f"{log_prefix} Could not determine valid digits ({digits}) for formatting. Using default float format.")
+            price_format_specifier = ":.5f" # Default to 5 decimal places if digits is invalid
+
+        # Use the pre-built format specifier and ensure the value is a float for formatting
+        try:
+            # Explicitly convert sl_distance_price to float before formatting
+            formatted_sl_distance_price = f"{float(sl_distance_price):{price_format_specifier}}"
+        except (ValueError, TypeError):
+            logger.warning(f"{log_prefix} Could not format sl_distance_price ({sl_distance_price}). Using raw value.")
+            formatted_sl_distance_price = str(sl_distance_price) # Fallback to string representation
+        logger.info(f"{log_prefix} Calculated Trailing SL for {symbol} {order_type}: CurrentPrice={current_price}, Distance={trail_distance_pips} pips ({formatted_sl_distance_price} price) -> SL Price={sl_price_rounded}")
         return sl_price_rounded
 
 

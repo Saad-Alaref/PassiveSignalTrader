@@ -3,8 +3,10 @@ import sys
 
 def main():
     print("Running all tests with coverage...\n")
+    # Use 'python -m pytest' to potentially help with path issues
+    # Specify the 'tests' directory explicitly
     result = subprocess.run(
-        ["pytest", "--maxfail=1", "--disable-warnings", "--cov=src", "--cov-report=term-missing", "-v"],
+        [sys.executable, "-m", "pytest", "tests/", "--maxfail=1", "--disable-warnings", "--cov=src", "--cov-report=term-missing", "-v"],
         stdout=sys.stdout,
         stderr=sys.stderr
     )

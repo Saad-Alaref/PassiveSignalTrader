@@ -19,6 +19,7 @@ def calculator():
     symbol_info.volume_max = 100.0
     symbol_info.volume_step = 0.01
     symbol_info.digits = 2
+    symbol_info.point = 0.01 # Add mock value for point
     mock_fetcher.get_symbol_info.return_value = symbol_info
     return TradeCalculator(mock_config, mock_fetcher)
 
@@ -52,8 +53,8 @@ def test_calculate_adjusted_entry_sell(calculator):
 
 def test_calculate_trailing_sl_buy(calculator):
     sl = calculator.calculate_trailing_sl_price('XAUUSD', mt5.ORDER_TYPE_BUY, 2000.0, 5.0)
-    assert sl == 1995.0
+    assert sl == 1999.5 # Updated assertion for pip calculation (2000.0 - (5 pips * 0.1 price/pip))
 
 def test_calculate_trailing_sl_sell(calculator):
     sl = calculator.calculate_trailing_sl_price('XAUUSD', mt5.ORDER_TYPE_SELL, 2000.0, 5.0)
-    assert sl == 2005.0
+    assert sl == 2000.5 # Updated assertion for pip calculation (2000.0 + (5 pips * 0.1 price/pip))

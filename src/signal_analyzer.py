@@ -37,16 +37,25 @@ class SignalAnalyzer:
             return "N/A"
 
     def _validate_take_profits(self, tp_list_raw):
-        """Validates and converts a list of TP values."""
+        """Validates a list of TP values, filtering out non-numeric entries like 'open'."""
         if not isinstance(tp_list_raw, list):
-            tp_list_raw = [tp_list_raw] # Ensure list
-        validated_tps = []
-        for tp in tp_list_raw:
-            if tp == "N/A" or tp is None or (isinstance(tp, str) and tp.upper() == "OPEN"):
-                validated_tps.append("N/A")
+            # Handle cases where LLM might return a single value instead of a list
+            if tp_list_raw is None or tp_list_raw == "N/A":
+                return ["N/A"]
+            tp_list_raw = [tp_list_raw] # Ensure list if it's a single valid value
+
+        numeric_tps = []
+        for tp_raw in tp_list_raw:
+            # Use _validate_price which returns float or "N/A"
+            validated_price = self._validate_price(tp_raw, "Take Profit")
+            # Only add if it's a valid number (not "N/A")
+            if isinstance(validated_price, (int, float)):
+                numeric_tps.append(validated_price)
             else:
-                validated_tps.append(self._validate_price(tp, "Take Profit"))
-        return validated_tps if validated_tps else ["N/A"] # Ensure not empty
+                logger.debug(f"Filtered out non-numeric TP value: '{tp_raw}'")
+
+        # Return the list of valid numeric TPs, or ["N/A"] if none were found
+        return numeric_tps if numeric_tps else ["N/A"]
 
     def _validate_numeric(self, value_raw, field_name):
         """Validates and converts generic numeric fields (volume, percentage)"""

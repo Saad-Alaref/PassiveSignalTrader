@@ -248,23 +248,28 @@ class DistributedLimitsStrategy(ExecutionStrategy):
             adjusted_entry_price = current_entry_price  # Default to original
             try:
                 tick = self.mt5_fetcher.get_symbol_tick(self.trade_symbol)
-                if tick:
+                logger.debug(f"{self.log_prefix} [DistLimit Entry Adjust] Fetched tick: {tick}") # DEBUG LOG
+                if tick and tick.ask > 0 and tick.bid > 0: # Check for valid tick prices
                     spread = round(tick.ask - tick.bid, self.digits)
+                    logger.debug(f"{self.log_prefix} [DistLimit Entry Adjust] Calculated spread: {spread}") # DEBUG LOG
                     # Use trade_calculator to adjust entry price with spread + offset
                     try:
                         adjusted_entry_price = self.trade_calculator.calculate_adjusted_entry_price(
-                            current_entry_price,
-                            self.action,
-                            spread
+                            symbol=self.trade_symbol,
+                            original_price=current_entry_price,
+                            direction=self.action,
+                            spread=spread # Ensure spread is passed
                         )
                         logger.info(f"{self.log_prefix} Adjusted entry for spread+offset: Original={current_entry_price}, Spread={spread} -> Adjusted={adjusted_entry_price}")
                     except Exception as e:
                         logger.error(f"{self.log_prefix} Error in trade_calculator.calculate_adjusted_entry_price: {e}")
                         adjusted_entry_price = current_entry_price
                 else:
-                    logger.warning(f"{self.log_prefix} Could not get tick data to adjust entry price for spread and offset.")
+                    logger.warning(f"{self.log_prefix} Could not get valid tick data to adjust entry price for spread and offset. Tick: {tick}. Using original price: {current_entry_price}")
+                    adjusted_entry_price = current_entry_price # Ensure it's assigned
             except Exception as e:
                 logger.error(f"{self.log_prefix} Error adjusting entry price for spread and offset: {e}")
+                adjusted_entry_price = current_entry_price # Ensure it's assigned
             # --- End Entry Price Adjustment ---
 
             # Determine TP using the mapped TPs from the assignment strategy
@@ -505,12 +510,17 @@ class SingleTradeStrategy(ExecutionStrategy):
         if self.exec_price is not None:
             try:
                 tick = self.mt5_fetcher.get_symbol_tick(self.trade_symbol)
-                if tick:
+                logger.debug(f"{self.log_prefix} [SingleTrade Entry Adjust] Fetched tick: {tick}") # DEBUG LOG
+                if tick and tick.ask > 0 and tick.bid > 0: # Check for valid tick prices
                     spread = round(tick.ask - tick.bid, self.digits)
+                    logger.debug(f"{self.log_prefix} [SingleTrade Entry Adjust] Calculated spread: {spread}") # DEBUG LOG
                     # Use trade_calculator to adjust entry price with spread + offset
                     # For test compatibility, support both positional and keyword args
                     adjusted_entry = self.trade_calculator.calculate_adjusted_entry_price(
-                        self.exec_price, self.action, spread
+                        symbol=self.trade_symbol, # Pass symbol
+                        original_price=self.exec_price,
+                        direction=self.action,
+                        spread=spread
                     )
                     if adjusted_entry is not None:
                         price_to_execute = adjusted_entry # Use adjusted price if calculation succeeds
@@ -518,7 +528,7 @@ class SingleTradeStrategy(ExecutionStrategy):
                     else:
                         logger.warning(f"{self.log_prefix} Failed to calculate adjusted entry price. Using original price: {self.exec_price}")
                 else:
-                    logger.warning(f"{self.log_prefix} Could not get tick data to adjust entry price. Using original price: {self.exec_price}")
+                    logger.warning(f"{self.log_prefix} Could not get valid tick data to adjust entry price. Using original price: {self.exec_price}. Tick: {tick}")
             except Exception as e:
                 logger.error(f"{self.log_prefix} Error adjusting entry price: {e}. Using original price: {self.exec_price}")
         # --- End Entry Price Adjustment ---

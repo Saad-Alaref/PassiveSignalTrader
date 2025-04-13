@@ -125,3 +125,6 @@ This document catalogs architectural patterns, design principles, and best pract
 
 - **Test Coverage:**
   Unit and integration tests are used to verify component behavior and end-to-end workflows, especially focusing on interactions and external system mocking.
+
+- **Python Compatibility:**
+  - The project targets Python 3.9. Use `Optional[...]` from the `typing` module for union types (e.g., `Optional[float]`), not the `|` union syntax, to ensure compatibility. The `|` syntax is only valid in Python 3.10+.

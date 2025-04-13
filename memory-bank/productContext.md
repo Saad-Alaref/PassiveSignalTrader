@@ -82,6 +82,8 @@ The **AI-Trader Bot** is an automated trading system that connects a Telegram ch
 - XAUUSD symbol is available on broker.
 
 ---
+- **Python Version:** The project is developed and tested with **Python 3.9**. All code and type hints must be compatible with Python 3.9.
+- **Type Hinting Standard:** Use `Optional[...]` from the `typing` module for union types (e.g., `Optional[float]` instead of `float | None`) to ensure compatibility with Python 3.9. The `|` union syntax is only supported in Python 3.10+.
 
 ## Open Questions / Future Considerations
 

@@ -85,6 +85,7 @@ async def test_check_and_apply_auto_be(trade_manager):
     trade_info = MagicMock()
     trade_info.auto_be_applied = False
     trade_info.ticket = 12345
+    trade_info.entry_price = pos.price_open # Mock adjusted entry price
 
     # Mock fetcher results needed for BE calculation
     mock_tick = MagicMock()
@@ -167,11 +168,12 @@ async def test_check_and_apply_trailing_stop(trade_manager):
     trade_info = MagicMock()
     trade_info.tsl_active = False
     trade_info.ticket = 54321
+    trade_info.entry_price = pos.price_open # Mock adjusted entry price
 
     # Mock fetcher results needed for TSL calculation
     mock_tick = MagicMock()
-    mock_tick.ask = 2010.50 # Price moved in profit
-    mock_tick.bid = 2010.00
+    mock_tick.ask = 2070.50 # Price moved significantly in profit ( > 60.0 activation distance)
+    mock_tick.bid = 2070.00
     trade_manager.mt5_fetcher.get_symbol_tick.return_value = mock_tick
 
     mock_symbol_info = MagicMock()
@@ -188,9 +190,12 @@ async def test_check_and_apply_trailing_stop(trade_manager):
     }.get((section, key), fallback)
 
     # Mock calculator result (optional, but good practice)
-    # Expected TSL = current_bid - (trail_pips * point * 10)
-    # Expected TSL = 2010.00 - (20.0 * 0.01 * 10) = 2010.00 - 2.0 = 2008.0
-    trade_manager.trade_calculator.calculate_trailing_sl_price.return_value = 2008.0
+    # Expected TSL = current_bid - trail_distance_price
+    # Expected TSL = 2070.00 - (20.0 pips * 1.0 price/pip) = 2070.00 - 20.0 = 2050.0
+    trade_manager.trade_calculator.calculate_trailing_sl_price.return_value = 2050.0
+    # Mock the new pips_to_price_distance call for activation threshold
+    # Expected activation distance = 60 pips * 1.0 price/pip (for XAUUSD) = 60.0
+    trade_manager.trade_calculator.pips_to_price_distance.return_value = 60.0
 
     # Mock executor methods used in the function
     trade_manager.mt5_executor.modify_trade.return_value = True
@@ -206,6 +211,6 @@ async def test_check_and_apply_trailing_stop(trade_manager):
     # Assert that the TSL flag was set
     assert trade_info.tsl_active is True
     # Assert the correct SL was passed to modify_trade
-    trade_manager.mt5_executor.modify_trade.assert_called_with(ticket=54321, sl=2008.0)
+    trade_manager.mt5_executor.modify_trade.assert_called_with(ticket=54321, sl=2050.0)
 
 # Removed obsolete test_check_and_handle_tp_hits: function no longer exists in TradeManager.

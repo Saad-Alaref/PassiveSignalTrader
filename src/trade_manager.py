@@ -248,24 +248,31 @@ class TradeManager:
         else:
             logger.warning(f"{log_prefix_auto_be} Could not get valid tick for spread calculation. Using offset only for BE SL.")
 
+        # Use the adjusted entry price stored in trade_info as the base for BE
+        base_entry_for_be = trade_info.entry_price
+        if base_entry_for_be is None:
+             logger.error(f"{log_prefix_auto_be} Cannot calculate BE SL: Adjusted entry price not found in trade_info.")
+             return # Cannot proceed without the adjusted entry
+
         be_sl = None
         if trade_type == mt5.ORDER_TYPE_BUY:
-            # For BUY, BE SL should be slightly ABOVE entry
-            be_sl = round(entry_price + spread + offset_price, digits)
-            logger.debug(f"{log_prefix_auto_be} Calculating BUY BE SL: Entry={entry_price}, Spread={spread}, Offset={offset_price} -> BE_SL={be_sl}")
+            # For BUY, BE SL should be slightly ABOVE adjusted entry
+            be_sl = round(base_entry_for_be + spread + offset_price, digits)
+            logger.debug(f"{log_prefix_auto_be} Calculating BUY BE SL: AdjEntry={base_entry_for_be}, Spread={spread}, Offset={offset_price} -> BE_SL={be_sl}")
         elif trade_type == mt5.ORDER_TYPE_SELL:
-            # For SELL, BE SL should be slightly BELOW entry
-            be_sl = round(entry_price - spread - offset_price, digits)
-            logger.debug(f"{log_prefix_auto_be} Calculating SELL BE SL: Entry={entry_price}, Spread={spread}, Offset={offset_price} -> BE_SL={be_sl}")
+            # For SELL, BE SL should be slightly BELOW adjusted entry
+            be_sl = round(base_entry_for_be - spread - offset_price, digits)
+            logger.debug(f"{log_prefix_auto_be} Calculating SELL BE SL: AdjEntry={base_entry_for_be}, Spread={spread}, Offset={offset_price} -> BE_SL={be_sl}")
         else:
             logger.error(f"{log_prefix_auto_be} Unknown trade type {trade_type}. Cannot calculate BE SL.")
             return # Abort if type is unknown
 
         # Sanity check: Ensure BE SL is actually better than entry after adjustments
-        if (trade_type == mt5.ORDER_TYPE_BUY and be_sl <= entry_price) or \
-           (trade_type == mt5.ORDER_TYPE_SELL and be_sl >= entry_price):
-            logger.warning(f"{log_prefix_auto_be} Calculated BE SL ({be_sl}) is not better than entry ({entry_price}) after spread/offset. Setting SL exactly to entry price as fallback.")
-            be_sl = entry_price # Fallback to exact entry if adjustment goes wrong way
+        # Sanity check: Ensure BE SL is actually better than the adjusted entry after adjustments
+        if (trade_type == mt5.ORDER_TYPE_BUY and be_sl <= base_entry_for_be) or \
+           (trade_type == mt5.ORDER_TYPE_SELL and be_sl >= base_entry_for_be):
+            logger.warning(f"{log_prefix_auto_be} Calculated BE SL ({be_sl}) is not better than adjusted entry ({base_entry_for_be}) after spread/offset. Setting SL exactly to adjusted entry price as fallback.")
+            be_sl = base_entry_for_be # Fallback to exact adjusted entry if adjustment goes wrong way
 
         if be_sl is None: # Should not happen if type check passed, but safety check
              logger.error(f"{log_prefix_auto_be} Failed to determine valid BE SL price. Aborting AutoBE.")
@@ -359,11 +366,17 @@ class TradeManager:
         # --- TSL Activation Logic ---
         if not tsl_active:
             # Calculate current profit distance in price units
+            # Use adjusted entry price from trade_info for profit calculation
+            base_entry_for_tsl = trade_info.entry_price
+            if base_entry_for_tsl is None:
+                 logger.error(f"{log_prefix_tsl} Cannot calculate profit distance: Adjusted entry price not found in trade_info.")
+                 return # Cannot proceed
+
             current_price_distance_profit = 0.0
             if trade_type == mt5.ORDER_TYPE_BUY:
-                current_price_distance_profit = relevant_market_price - entry_price # Bid - Entry
+                current_price_distance_profit = relevant_market_price - base_entry_for_tsl # Bid - AdjustedEntry
             elif trade_type == mt5.ORDER_TYPE_SELL:
-                current_price_distance_profit = entry_price - relevant_market_price # Entry - Ask
+                current_price_distance_profit = base_entry_for_tsl - relevant_market_price # AdjustedEntry - Ask
 
             # Compare current price distance profit with activation price distance threshold
             if current_price_distance_profit >= activation_price_distance:
@@ -385,8 +398,9 @@ class TradeManager:
                 # --- Sanity Check: Ensure initial TSL locks in *some* profit ---
                 # (i.e., SL is better than entry price)
                 initial_tsl_locks_profit = False
-                # Adjust trailing SL for spread + offset relative to entry price
-                adjusted_entry_sl = self.mt5_executor._adjust_sl_for_spread_offset(entry_price, trade_type, symbol)
+                # Calculate the actual breakeven point (adjusted entry +/- spread +/- sl_offset) to compare against
+                # Use the adjusted entry price from trade_info as the base
+                adjusted_entry_sl = self.mt5_executor._adjust_sl_for_spread_offset(base_entry_for_tsl, trade_type, symbol)
 
                 if trade_type == mt5.ORDER_TYPE_BUY and new_tsl_price > adjusted_entry_sl:
                     initial_tsl_locks_profit = True
@@ -394,7 +408,7 @@ class TradeManager:
                     initial_tsl_locks_profit = True
 
                 if not initial_tsl_locks_profit:
-                     logger.warning(f"{log_prefix_tsl} Calculated initial TSL price ({new_tsl_price}) does not lock profit (Entry: {entry_price}). Activation condition might be too tight or market moved unfavorably. Will retry next cycle.")
+                     logger.warning(f"{log_prefix_tsl} Calculated initial TSL price ({new_tsl_price}) does not lock profit relative to adjusted entry BE point ({adjusted_entry_sl}). Activation condition might be too tight or market moved unfavorably. Will retry next cycle.")
                      return # Don't activate if it doesn't lock profit
 
                 # --- Check if calculated TSL is better than existing SL (if any) ---
@@ -454,8 +468,14 @@ class TradeManager:
             if current_sl is None or current_sl == 0.0:
                 # If there's no current SL (shouldn't happen if TSL is active, but handle defensively),
                 # apply the new TSL only if it locks profit.
-                # Adjust trailing SL for spread + offset relative to entry price
-                adjusted_entry_sl = self.mt5_executor._adjust_sl_for_spread_offset(entry_price, trade_type, symbol)
+                # Calculate the actual breakeven point (adjusted entry +/- spread +/- sl_offset)
+                # Use the adjusted entry price from trade_info as the base
+                base_entry_for_tsl_update = trade_info.entry_price # Re-fetch adjusted entry
+                if base_entry_for_tsl_update is None:
+                     logger.error(f"{log_prefix_tsl} Cannot check profit lock: Adjusted entry price not found in trade_info.")
+                     # Decide how to handle: maybe skip applying SL? For now, log and continue comparison with current_sl
+                else:
+                     adjusted_entry_sl = self.mt5_executor._adjust_sl_for_spread_offset(base_entry_for_tsl_update, trade_type, symbol)
 
                 if trade_type == mt5.ORDER_TYPE_BUY and new_tsl_price > adjusted_entry_sl:
                     move_sl = True

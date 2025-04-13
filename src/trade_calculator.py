@@ -165,8 +165,8 @@ class TradeCalculator:
         point = symbol_info.point
         digits = symbol_info.digits
 
-        # Determine pip multiplier (1 pip = 10 points for 3/5 digits, 100 otherwise)
-        pip_multiplier = 10 if digits in [3, 5] else 100
+        # User definition: 1 pip = 10 points regardless of digits (e.g., for XAUUSD, 1 pip = 10 * 0.01 = 0.1 price units)
+        pip_multiplier = 10
         price_distance = round(abs(pips) * point * pip_multiplier, digits)
         logger.debug(f"{log_prefix} Converted {pips} pips to price distance: {price_distance} (Point={point}, Digits={digits}, Multiplier={pip_multiplier})")
         return price_distance
@@ -298,7 +298,7 @@ class TradeCalculator:
         logger.info(f"{log_prefix} Calculated TP for {symbol} {order_type}: Entry={entry_price}, Distance={tp_distance_pips} pips ({tp_distance_price:.{digits}f} price) -> TP Price={tp_price_rounded}")
         return tp_price_rounded
 
-    def calculate_adjusted_entry_price(self, symbol: str, original_price: float, direction: str, spread: float) -> float | None:
+    def calculate_adjusted_entry_price(self, symbol: str, original_price: float, direction: str, spread: float) -> Optional[float]:
         """
         Calculates the adjusted entry price based on direction, spread, and configured pip offset.
 

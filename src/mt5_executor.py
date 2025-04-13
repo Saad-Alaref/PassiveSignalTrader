@@ -173,8 +173,10 @@ class MT5Executor:
             return sl
 
         spread = round(tick.ask - tick.bid, digits)
-        # NOTE: Assumes 1 pip = 10 points (e.g., for XAUUSD where point=0.01). Needs adjustment for other instruments.
-        offset_price = round(self.sl_offset_pips * (point * 10), digits)
+        # Correct pip-to-price conversion for SL offset
+        pip_multiplier_sl = 10 # User definition: 1 pip = 10 points always
+        offset_price = round(abs(self.sl_offset_pips) * point * pip_multiplier_sl, digits)
+        logger.debug(f"[AdjustSL] SL Offset Pips={self.sl_offset_pips}, Point={point}, Digits={digits}, Multiplier={pip_multiplier_sl} -> Offset Price={offset_price}")
 
         adjusted_sl = sl
         if order_type in [mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP, mt5.ORDER_TYPE_BUY_STOP_LIMIT]:
@@ -265,11 +267,52 @@ class MT5Executor:
         if tp is not None:
             request["tp"] = float(tp)
 
-        # Zero SL/TP should be omitted or handled carefully depending on broker
-        if request.get("sl") == 0.0: del request["sl"]
-        if request.get("tp") == 0.0: del request["tp"]
+        # --- Validate SL/TP relative to Price ---
+        req_price = request.get("price")
+        req_sl = request.get("sl")
+        req_tp = request.get("tp")
+        req_type = request.get("type")
 
+        # Remove 0.0 values as they mean "no change" or "remove" for MT5
+        if req_sl == 0.0:
+            request.pop("sl", None)
+            req_sl = None
+        if req_tp == 0.0:
+            request.pop("tp", None)
+            req_tp = None
 
+        # Check for invalid TP/SL combinations *before* sending
+        if req_price is not None and req_type is not None:
+            if req_tp is not None:
+                if req_type in [mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP] and req_tp <= req_price:
+                    logger.warning(f"Invalid TP ({req_tp}) for BUY order at price {req_price}. Removing TP.")
+                    request.pop("tp", None) # Remove invalid TP
+                elif req_type in [mt5.ORDER_TYPE_SELL, mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP] and req_tp >= req_price:
+                    logger.warning(f"Invalid TP ({req_tp}) for SELL order at price {req_price}. Removing TP.")
+                    request.pop("tp", None) # Remove invalid TP
+            # Re-fetch req_tp in case it was removed
+            req_tp = request.get("tp")
+
+            if req_sl is not None:
+                 # Check SL vs Price
+                 if req_type in [mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP] and req_sl >= req_price:
+                      logger.warning(f"Invalid SL ({req_sl}) for BUY order at price {req_price}. Removing SL.")
+                      request.pop("sl", None) # Remove invalid SL
+                 elif req_type in [mt5.ORDER_TYPE_SELL, mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP] and req_sl <= req_price:
+                      logger.warning(f"Invalid SL ({req_sl}) for SELL order at price {req_price}. Removing SL.")
+                      request.pop("sl", None) # Remove invalid SL
+                 # Re-fetch req_sl in case it was removed
+                 req_sl = request.get("sl")
+
+                 # Check SL vs TP (if both still exist)
+                 if req_sl is not None and req_tp is not None:
+                      if req_type in [mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP] and req_sl >= req_tp:
+                           logger.warning(f"Invalid SL ({req_sl}) relative to TP ({req_tp}) for BUY order. Removing SL.")
+                           request.pop("sl", None) # Remove invalid SL
+                      elif req_type in [mt5.ORDER_TYPE_SELL, mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP] and req_sl <= req_tp:
+                           logger.warning(f"Invalid SL ({req_sl}) relative to TP ({req_tp}) for SELL order. Removing SL.")
+                           request.pop("sl", None) # Remove invalid SL
+        # --- End Validation ---
         return self._send_order_with_retry(request)
 
     def modify_trade(self, ticket, sl=None, tp=None):

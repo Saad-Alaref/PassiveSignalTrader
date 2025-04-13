@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import List, Any, Dict, Optional, Union
+from .models import SignalData # Import SignalData
 
 
 class ConfigValidationError(Exception):
@@ -25,13 +26,13 @@ class ConfigValidator:
 class TPAssignmentStrategy(ABC):
     """Abstract base for TP assignment strategies."""
     @abstractmethod
-    def assign_tps(self, trade_data: dict, signal_data: dict) -> List[Optional[float]]:
+    def assign_tps(self, trade_data: dict, signal_data: SignalData) -> List[Optional[float]]: # Use SignalData type hint
         pass
 
 
 class NoneTPAssignment(TPAssignmentStrategy):
     """Assigns no TPs."""
-    def assign_tps(self, trade_data: dict, signal_data: dict) -> List[Optional[float]]:
+    def assign_tps(self, trade_data: dict, signal_data: SignalData) -> List[Optional[float]]: # Use SignalData type hint
         return [None] * trade_data.get("num_trades", 1)
 
 
@@ -40,9 +41,9 @@ class FirstTPFirstTradeAssignment(TPAssignmentStrategy):
     Assigns the first TP from the signal to the first trade, and None to all subsequent trades.
     For single-trade scenarios, assigns the first TP if available, else None.
     """
-    def assign_tps(self, trade_data: dict, signal_data: dict) -> List[Optional[float]]:
+    def assign_tps(self, trade_data: dict, signal_data: SignalData) -> List[Optional[float]]: # Use SignalData type hint
         num_trades = trade_data.get("num_trades", 1)
-        tps_from_signal = signal_data.get("take_profits", [])
+        tps_from_signal = signal_data.take_profits if signal_data and signal_data.take_profits else [] # Access attribute
         first_tp = None
         # Find the first valid numeric TP
         for tp in tps_from_signal:
@@ -67,9 +68,9 @@ class CustomMappingTPAssignment(TPAssignmentStrategy):
     def __init__(self, mapping: list):
         self.mapping = mapping
 
-    def assign_tps(self, trade_data: dict, signal_data: dict) -> List[Optional[float]]:
+    def assign_tps(self, trade_data: dict, signal_data: SignalData) -> List[Optional[float]]: # Use SignalData type hint
         num_trades = trade_data.get("num_trades", 1)
-        tps_from_signal = signal_data.get("take_profits", [])
+        tps_from_signal = signal_data.take_profits if signal_data and signal_data.take_profits else [] # Access attribute
         result = []
         for i in range(num_trades):
             if i < len(self.mapping):

@@ -1,5 +1,6 @@
 import pytest
 from unittest.mock import MagicMock, AsyncMock
+import types # Import types for SimpleNamespace
 
 import asyncio
 
@@ -51,7 +52,7 @@ async def test_single_trade_signal_with_single_tp_and_sl():
         take_profits_list=[2330.00],
         auto_tp_applied=False,
         tp_assignment_config=tp_assignment_config,
-        signal_data=signal_data,
+        signal_data=types.SimpleNamespace(**signal_data), # Convert dict to object
         mt5_executor=mt5_executor,
         trade_calculator=trade_calculator,
         state_manager=state_manager,
@@ -102,7 +103,7 @@ async def test_multi_trade_signal_with_entry_range_and_multiple_tps():
     strategy = DistributedLimitsStrategy(
         entry_price_raw="2320.00-2322.00",
         tp_assignment_config=tp_assignment_config,
-        signal_data=signal_data,
+        signal_data=types.SimpleNamespace(**signal_data), # Convert dict to object
         mt5_executor=mt5_executor,
         trade_calculator=trade_calculator,
         state_manager=state_manager,
@@ -206,7 +207,7 @@ async def test_multi_trade_signal_with_single_tp_and_mapping_out_of_range():
     strategy = DistributedLimitsStrategy(
         entry_price_raw="2320.00-2322.00",
         tp_assignment_config=tp_assignment_config,
-        signal_data=signal_data,
+        signal_data=types.SimpleNamespace(**signal_data), # Convert dict to object
         mt5_executor=mt5_executor,
         trade_calculator=trade_calculator,
         state_manager=state_manager,
@@ -285,7 +286,7 @@ async def test_entry_and_sl_adjustment_for_offset_and_spread():
         take_profits_list=[2330.00],
         auto_tp_applied=False,
         tp_assignment_config=tp_assignment_config,
-        signal_data=signal_data,
+        signal_data=types.SimpleNamespace(**signal_data), # Convert dict to object
         mt5_executor=mt5_executor,
         trade_calculator=trade_calculator,
         state_manager=state_manager,

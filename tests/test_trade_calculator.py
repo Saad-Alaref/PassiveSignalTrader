@@ -30,21 +30,21 @@ def calculator():
 def test_calculate_sl_buy(calculator):
     # Simulate pips-to-price conversion: 40 pips * 0.1 = 4.0 price units
     sl = calculator.calculate_sl_from_distance('XAUUSD', mt5.ORDER_TYPE_BUY, 2000.0, 40.0) # Corrected pip distance
-    assert sl == 1996.0
+    assert sl == 1996.0 # Reverted: 40 pips = 4.0 price distance for XAUUSD (User Def)
 
 def test_calculate_sl_sell(calculator):
     sl = calculator.calculate_sl_from_distance('XAUUSD', mt5.ORDER_TYPE_SELL, 2000.0, 40.0) # Corrected pip distance
-    assert sl == 2004.0
+    assert sl == 2004.0 # Reverted: 40 pips = 4.0 price distance for XAUUSD (User Def)
 
 def test_calculate_tp_buy(calculator):
     # Test with 100 pips distance (100 * 0.01 * 10 = 10.0 price distance)
     tp = calculator.calculate_tp_from_distance('XAUUSD', mt5.ORDER_TYPE_BUY, 2000.0, 100.0)
-    assert tp == 2010.0 # 2000.0 + 10.0
+    assert tp == 2010.0 # Reverted: 100 pips = 10.0 price distance for XAUUSD (User Def)
 
 def test_calculate_tp_sell(calculator):
     # Test with 100 pips distance (100 * 0.01 * 10 = 10.0 price distance)
     tp = calculator.calculate_tp_from_distance('XAUUSD', mt5.ORDER_TYPE_SELL, 2000.0, 100.0)
-    assert tp == 1990.0 # 2000.0 - 10.0
+    assert tp == 1990.0 # Reverted: 100 pips = 10.0 price distance for XAUUSD (User Def)
 
 def test_calculate_adjusted_entry_buy(calculator):
     price = calculator.calculate_adjusted_entry_price('XAUUSD', 2000.0, 'BUY', 0.5)
@@ -56,23 +56,23 @@ def test_calculate_adjusted_entry_sell(calculator):
 
 def test_calculate_trailing_sl_buy(calculator):
     sl = calculator.calculate_trailing_sl_price('XAUUSD', mt5.ORDER_TYPE_BUY, 2000.0, 5.0)
-    assert sl == 1999.5 # Updated assertion for pip calculation (2000.0 - (5 pips * 0.1 price/pip))
+    assert sl == 1999.5 # Reverted: 5 pips = 0.5 price distance for XAUUSD (User Def)
 
 def test_calculate_trailing_sl_sell(calculator):
     sl = calculator.calculate_trailing_sl_price('XAUUSD', mt5.ORDER_TYPE_SELL, 2000.0, 5.0)
-    assert sl == 2000.5 # Updated assertion for pip calculation (2000.0 + (5 pips * 0.1 price/pip))
+    assert sl == 2000.5 # Reverted: 5 pips = 0.5 price distance for XAUUSD (User Def)
 
 def test_calculate_sl_from_pips_buy(calculator):
     # 40 pips * 0.01 * 10 = 4.0, BUY: 2000.0 - 4.0 = 1996.0
     import MetaTrader5 as mt5
     sl = calculator.calculate_sl_from_pips('XAUUSD', mt5.ORDER_TYPE_BUY, 2000.0, 40.0)
-    assert sl == 1996.0
+    assert sl == 1996.0 # Reverted: 40 pips = 4.0 price distance for XAUUSD (User Def)
 
 def test_calculate_sl_from_pips_sell(calculator):
     # 40 pips * 0.01 * 10 = 4.0, SELL: 2000.0 + 4.0 = 2004.0
     import MetaTrader5 as mt5
     sl = calculator.calculate_sl_from_pips('XAUUSD', mt5.ORDER_TYPE_SELL, 2000.0, 40.0)
-    assert sl == 2004.0
+    assert sl == 2004.0 # Reverted: 40 pips = 4.0 price distance for XAUUSD (User Def)
 
 def test_calculate_sl_from_pips_zero_distance(calculator):
     # Should return None for zero pips

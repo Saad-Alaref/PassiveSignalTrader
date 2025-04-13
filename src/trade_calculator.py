@@ -5,6 +5,8 @@ from src.mt5_data_fetcher import MT5DataFetcher
 import MetaTrader5 as mt5
 logger = logging.getLogger('TradeBot')
 
+from typing import Optional
+
 class TradeCalculator:
     """
     Calculates trade parameters, primarily the lot size (volume).
@@ -141,7 +143,7 @@ class TradeCalculator:
     #     # ... get value per point per lot ...
     #     # ... apply formula ...
     #     # ... handle potential division by zero, normalize lot size ...
-    def pips_to_price_distance(self, symbol: str, pips: float) -> float | None:
+    def pips_to_price_distance(self, symbol: str, pips: float) -> Optional[float]:
         """
         Converts a distance in pips to the equivalent price distance for the given symbol.
 

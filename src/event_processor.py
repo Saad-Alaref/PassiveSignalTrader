@@ -533,11 +533,8 @@ async def process_new_signal(signal_data: SignalData, message_id, state_manager:
 
         # Check conditions for distributed limits
         use_distributed_limits = (
-            tp_strategy == 'sequential_partial_close' and
             entry_range_strategy == 'distributed' and
-            is_entry_range and
-            lot_size >= base_split_lot * 2 and
-            numeric_tps # Ensure numeric_tps were successfully parsed earlier
+            is_entry_range
         )
 
         # Check conditions for multi-trade market/stop

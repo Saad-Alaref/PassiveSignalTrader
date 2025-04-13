@@ -173,7 +173,8 @@ class MT5Executor:
             return sl
 
         spread = round(tick.ask - tick.bid, digits)
-        offset_price = round(self.sl_offset_pips * (point * 10), digits) # Assuming 1 pip = 10 points
+        # NOTE: Assumes 1 pip = 10 points (e.g., for XAUUSD where point=0.01). Needs adjustment for other instruments.
+        offset_price = round(self.sl_offset_pips * (point * 10), digits)
 
         adjusted_sl = sl
         if order_type in [mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP, mt5.ORDER_TYPE_BUY_STOP_LIMIT]:

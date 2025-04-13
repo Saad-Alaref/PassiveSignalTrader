@@ -80,25 +80,21 @@ class StateManager:
 
         # Convert dict to TradeInfo dataclass instance
         try:
-            # Ensure all required fields for TradeInfo are present or have defaults
-            trade_obj = TradeInfo(
-                ticket=trade_info_data['ticket'],
-                symbol=trade_info_data['symbol'],
-                open_time=trade_info_data['open_time'],
-                original_msg_id=trade_info_data['original_msg_id'],
-                entry_price=trade_info_data.get('entry_price'), # Use .get for optional fields
-                initial_sl=trade_info_data.get('initial_sl'),
-                original_volume=trade_info_data['original_volume'],
-                all_tps=trade_info_data.get('all_tps', []), # Default to empty list
-                tp_strategy=trade_info_data['tp_strategy'],
-                assigned_tp=trade_info_data.get('assigned_tp'),
-                is_pending=trade_info_data.get('is_pending', False),
-                tsl_active=False, # Initialize TSL flag
-                auto_tp_applied=auto_tp_applied, # Add the flag
-                next_tp_index=trade_info_data.get('next_tp_index', 0),
-                sequence_info=trade_info_data.get('sequence_info'),
-                auto_sl_pending_timestamp=None # Initialize as None
-            )
+            # Only pass fields that exist in the TradeInfo dataclass
+            trade_info_fields = {
+                'ticket', 'symbol', 'open_time', 'original_msg_id', 'entry_price', 'initial_sl',
+                'original_volume', 'all_tps', 'assigned_tp', 'is_pending', 'tsl_active',
+                'auto_tp_applied', 'sequence_info', 'auto_sl_pending_timestamp'
+            }
+            filtered_data = {k: v for k, v in trade_info_data.items() if k in trade_info_fields}
+            # Set defaults for fields not present
+            filtered_data.setdefault('all_tps', [])
+            filtered_data.setdefault('is_pending', False)
+            filtered_data.setdefault('tsl_active', False)
+            filtered_data.setdefault('auto_tp_applied', auto_tp_applied)
+            filtered_data.setdefault('sequence_info', None)
+            filtered_data.setdefault('auto_sl_pending_timestamp', None)
+            trade_obj = TradeInfo(**filtered_data)
         except KeyError as e:
             logger.error(f"Missing required key '{e}' in trade_info_data when creating TradeInfo object: {trade_info_data}")
             return

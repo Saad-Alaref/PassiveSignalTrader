@@ -13,13 +13,28 @@ This document catalogs architectural patterns, design principles, and best pract
   The system is split into clear modules (Telegram, LLM, MT5, Decision Logic, Trade Management, State, Config, Logging) with well-defined interfaces, promoting maintainability and testability.
 
 - **Pipeline Workflow:**
-  Incoming Telegram messages flow through deduplication → LLM analysis → decision logic → trade calculation → pre-checks → execution, with clear logging and error handling at each stage.
+  Incoming Telegram messages flow through early deduplication → LLM analysis → decision logic → trade calculation → pre-checks → execution, with clear logging and error handling at each stage.
 
 - **Strategy Pattern for Trade Execution:**
   Different execution strategies (single trade, distributed limits, multi-market stop) are encapsulated in interchangeable classes, selected dynamically based on signal type.
 
 - **Command Pattern for Trade Updates:**
   Trade update actions (modify SL/TP, close, cancel, partial close) are encapsulated as commands, simplifying orchestration and extension.
+
+---
+
+## Take Profit (TP) Assignment System [2025-04-13 21:37]
+
+- **Modular TP Assignment:**
+  The bot uses a configuration-driven TP assignment system (`src/tp_assignment.py`) based on the Strategy pattern.
+  - The `[TPAssignment]` section in `config.ini` controls the TP assignment mode.
+  - **Supported Modes:**
+    - `mode = none`: Assigns no TP (`None`) to any trade. Relies on other mechanisms like TSL/BE.
+    - `mode = first_tp_first_trade`: Assigns the first valid TP from the signal to the first trade only. Subsequent trades (in multi-trade scenarios) get no TP. Single trades get the first TP if available.
+    - `mode = custom_mapping`: Assigns TPs based on a user-defined `mapping` list in the config. The list contains 0-based indices of TPs from the signal or the string 'none'. Example: `mapping = 0, none, 1` assigns the first signal TP to the first trade, no TP to the second, and the second signal TP to the third trade. Indices out of range for the signal's TPs result in no TP (`None`).
+  - **Removed Modes:** `fixed`, `risk-ratio`, `custom` (using `custom_func`).
+  - **Removed Parameters:** `tp_sequence`, `SequenceMapper` logic is no longer used.
+  - The old `[Strategy] tp_execution_strategy` setting is still used by `event_processor.py` to determine an *initial* TP candidate from the signal, but the final TP assigned to the order is determined by the active `[TPAssignment]` mode.
 
 ---
 
@@ -63,8 +78,12 @@ This document catalogs architectural patterns, design principles, and best pract
   - Does *not* currently account for spread/offset.
 
 - **Auto Break-Even (AutoBE):**
-  - Moves SL to a slightly profitable position (entry + spread + offset) when a scaled USD profit threshold (`auto_be_profit_usd`) is met.
+  - Moves SL to a slightly profitable position (entry + spread + offset) when a pip profit threshold (`auto_be_profit_pips`) is met.
+  - Activation is now based on price movement in pips, not USD or trade volume.
   - Ensures no loss if BE SL is hit.
+
+- **Auto Take Profit (AutoTP):**
+  - Applies a TP based on a configured fixed pip distance (`auto_tp_distance_pips`) if the signal lacks one.
 
 - **Trailing Stop Loss (TSL):**
   - Activates when profit reaches a configured pip threshold (`activation_profit_pips`).
@@ -103,3 +122,6 @@ This document catalogs architectural patterns, design principles, and best pract
 
 - **Graceful Shutdown:**
   Ensures connections are closed cleanly on exit.
+
+- **Test Coverage:**
+  Unit and integration tests are used to verify component behavior and end-to-end workflows, especially focusing on interactions and external system mocking.

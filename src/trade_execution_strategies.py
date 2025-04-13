@@ -9,40 +9,44 @@ from .mt5_executor import MT5Executor
 from .telegram_sender import TelegramSender
 from .duplicate_checker import DuplicateChecker
 from .mt5_data_fetcher import MT5DataFetcher
+from .tp_assignment import get_tp_assignment_strategy, ConfigValidator, ConfigValidationError # Removed SequenceMapper
 
 logger = logging.getLogger('TradeBot')
 
 # --- Base Strategy Class ---
 class ExecutionStrategy(ABC):
     """Abstract base class for different trade execution strategies."""
-    def __init__(self, action, trade_symbol, lot_size, exec_sl, numeric_tps,
-                 message_id, config_service_instance, mt5_fetcher: MT5DataFetcher, mt5_executor: MT5Executor, # Use service instance
-                 state_manager: StateManager, telegram_sender: TelegramSender,
-                 duplicate_checker: DuplicateChecker, log_prefix: str,
-                 trade_calculator):
-        self.action = action
-        self.trade_symbol = trade_symbol
-        self.lot_size = lot_size
-        self.exec_sl = exec_sl
-        self.numeric_tps = numeric_tps
-        self.message_id = message_id
-        self.config_service = config_service_instance # Store service instance
-        self.mt5_fetcher = mt5_fetcher
-        self.mt5_executor = mt5_executor
-        self.state_manager = state_manager
-        self.telegram_sender = telegram_sender
-        self.duplicate_checker = duplicate_checker
-        self.log_prefix = log_prefix
-        self.trade_calculator = trade_calculator
-        self.debug_channel_id = getattr(telegram_sender, 'debug_target_channel_id', None)
-        self.tp_strategy = self.config_service.get('Strategy', 'tp_execution_strategy', fallback='first_tp_full_close').lower() # Use service
-
-        # Common initializations
-        self.symbol_info = self.mt5_fetcher.get_symbol_info(self.trade_symbol)
-        self.min_lot = self.symbol_info.volume_min if self.symbol_info else 0.01
-        self.lot_step = self.symbol_info.volume_step if self.symbol_info else 0.01
-        self.digits = self.symbol_info.digits if self.symbol_info else 5
-        self.base_split_lot = max(self.min_lot, 0.01)
+    def __init__(self, *args, **kwargs):
+        # Allow dependency injection for testing
+        self.action = kwargs.get('action', None)
+        self.trade_symbol = kwargs.get('trade_symbol', None)
+        self.lot_size = kwargs.get('lot_size', None)
+        self.exec_sl = kwargs.get('exec_sl', None)
+        self.numeric_tps = kwargs.get('numeric_tps', None) # Note: Primarily used by old logic, new TP system uses signal_data
+        self.message_id = kwargs.get('message_id', None)
+        self.config_service = kwargs.get('config_service', None) or kwargs.get('config_service_instance', None)
+        self.mt5_fetcher = kwargs.get('mt5_fetcher', None)
+        self.mt5_executor = kwargs.get('mt5_executor', None)
+        self.state_manager = kwargs.get('state_manager', None)
+        self.telegram_sender = kwargs.get('telegram_sender', None)
+        self.duplicate_checker = kwargs.get('duplicate_checker', None)
+        self.log_prefix = kwargs.get('log_prefix', "")
+        self.trade_calculator = kwargs.get('trade_calculator', None)
+        self.debug_channel_id = getattr(self.telegram_sender, 'debug_target_channel_id', None) if self.telegram_sender else None
+        # self.tp_strategy = "first_tp_full_close" # Obsolete: TP assignment handled by TPAssignment config
+        # Common initializations (skip if missing for test)
+        if self.mt5_fetcher and self.trade_symbol:
+            self.symbol_info = self.mt5_fetcher.get_symbol_info(self.trade_symbol)
+            self.min_lot = self.symbol_info.volume_min if self.symbol_info else 0.01
+            self.lot_step = self.symbol_info.volume_step if self.symbol_info else 0.01
+            self.digits = self.symbol_info.digits if self.symbol_info else 5
+            self.base_split_lot = max(self.min_lot, 0.01)
+        else:
+            self.symbol_info = None
+            self.min_lot = 0.01
+            self.lot_step = 0.01
+            self.digits = 5
+            self.base_split_lot = 0.01
 
 
     @abstractmethod
@@ -67,7 +71,7 @@ class ExecutionStrategy(ABC):
             # For multi-trade strategies, store only the assigned TP.
             # For single trade, store the original list passed for reference/reporting.
             'all_tps': take_profits_list_ref if take_profits_list_ref is not None else ([assigned_tp] if assigned_tp is not None else []),
-            'tp_strategy': self.tp_strategy,
+            # 'tp_strategy': self.tp_strategy, # Obsolete
             'assigned_tp': assigned_tp, # The TP actually set on this order/position
             'is_pending': is_pending,
             'sequence_info': sequence_info,
@@ -85,11 +89,14 @@ class ExecutionStrategy(ABC):
 
 
 # --- Concrete Strategy: Distributed Limits ---
+
 class DistributedLimitsStrategy(ExecutionStrategy):
-    """Handles the execution of distributed pending limit orders across a range."""
-    def __init__(self, entry_price_raw, **kwargs):
+    """Handles the execution of distributed pending limit orders across a range, with modular TP assignment."""
+    def __init__(self, entry_price_raw, tp_assignment_config=None, signal_data=None, **kwargs):
         super().__init__(**kwargs)
         self.entry_price_raw = entry_price_raw # Keep the raw range string
+        self.tp_assignment_config = tp_assignment_config or {"mode": "none"}
+        self.signal_data = signal_data or {}
 
     async def execute(self):
         logger.info(f"{self.log_prefix} Applying distributed pending limit order strategy.")
@@ -116,6 +123,25 @@ class DistributedLimitsStrategy(ExecutionStrategy):
              return
 
         logger.info(f"{self.log_prefix} Calculated Trades: {num_full_trades} x {self.base_split_lot}, Remainder: {remainder_lot}. Total: {total_trades_to_open}. Range: {low_price}-{high_price}")
+
+        # --- Modular TP Assignment ---
+        try:
+            ConfigValidator.validate_tp_assignment_config(self.tp_assignment_config)
+            tp_strategy = get_tp_assignment_strategy(self.tp_assignment_config)
+            trade_data = {"num_trades": total_trades_to_open}
+            assigned_tps = tp_strategy.assign_tps(trade_data, self.signal_data)
+        except ConfigValidationError as e:
+            logger.error(f"{self.log_prefix} TP assignment config error: {e}")
+            assigned_tps = [None] * total_trades_to_open
+        except Exception as e:
+            logger.error(f"{self.log_prefix} TP assignment error: {e}")
+            assigned_tps = [None] * total_trades_to_open
+
+        # assigned_tps is the final mapping
+        mapped_tps = assigned_tps
+
+        # For reporting and state, store the full mapped TP list
+        all_tps_for_state = mapped_tps.copy()
 
         # Check if Entry Range Split Mode is enabled
         split_mode_enabled = False
@@ -241,20 +267,10 @@ class DistributedLimitsStrategy(ExecutionStrategy):
                 logger.error(f"{self.log_prefix} Error adjusting entry price for spread and offset: {e}")
             # --- End Entry Price Adjustment ---
 
-            # Determine TP
-            tp_index = min(i, len(self.numeric_tps) - 1)
+            # Determine TP using the mapped TPs from the assignment strategy
+            current_exec_tp = mapped_tps[i] if i < len(mapped_tps) else None
 
-            # Partial TP-Free Mode logic
-            partial_tp_free_mode = False
-            try:
-                partial_tp_free_mode = self.config_service.getboolean('Strategy', 'partial_tp_free_mode_enabled', fallback=False)
-            except:
-                pass
-
-            if partial_tp_free_mode and i >= 1:
-                current_exec_tp = None
-            else:
-                current_exec_tp = self.numeric_tps[tp_index]
+            # Removed obsolete Partial TP-Free Mode logic
 
             trade_comment = f"TB SigID {self.message_id} Dist {i+1}/{total_trades_to_open}"
 
@@ -275,7 +291,8 @@ class DistributedLimitsStrategy(ExecutionStrategy):
                 self._store_trade_info(
                     ticket=ticket, entry_price=adjusted_entry_price, volume=current_vol,
                     assigned_tp=current_exec_tp, is_pending=True,
-                    sequence_info=f"Dist {i+1}/{total_trades_to_open}"
+                    sequence_info=f"Dist {i+1}/{total_trades_to_open}",
+                    take_profits_list_ref=all_tps_for_state # Pass the full list for multi-trade
                 )
             else:
                 failed_trades += 1
@@ -316,16 +333,18 @@ class DistributedLimitsStrategy(ExecutionStrategy):
             self.duplicate_checker.add_processed_id(self.message_id)
             await self.telegram_sender.send_message(status_message, parse_mode='html')
             if self.debug_channel_id: await self.telegram_sender.send_message(f"❌ {self.log_prefix} All distributed pending orders failed.\n{status_message}", target_chat_id=self.debug_channel_id, parse_mode='html')
-            if self.debug_channel_id: await self.telegram_sender.send_message(f"❌ {self.log_prefix} All distributed pending orders failed.\n{status_message}", target_chat_id=self.debug_channel_id, parse_mode='html')
 
 
 # --- Concrete Strategy: Multi Market/Stop Orders ---
+
 class MultiMarketStopStrategy(ExecutionStrategy):
-    """Handles the execution of multiple market/stop orders for sequential TPs."""
-    def __init__(self, determined_order_type, exec_price, **kwargs):
+    """Handles the execution of multiple market/stop orders for sequential TPs, with modular TP assignment."""
+    def __init__(self, determined_order_type, exec_price, tp_assignment_config=None, signal_data=None, **kwargs):
         super().__init__(**kwargs)
         self.determined_order_type = determined_order_type
         self.exec_price = exec_price # Entry price for stop orders, None for market
+        self.tp_assignment_config = tp_assignment_config or {"mode": "none"}
+        self.signal_data = signal_data or {}
 
     async def execute(self):
         logger.info(f"{self.log_prefix} Applying multi-trade sequential TP strategy (Market/Stop). Base Split Lot: {self.base_split_lot}")
@@ -337,12 +356,25 @@ class MultiMarketStopStrategy(ExecutionStrategy):
         total_trades_to_open = num_full_trades + (1 if remainder_lot > 0 else 0)
         logger.info(f"{self.log_prefix} Calculated Trades: {num_full_trades} x {self.base_split_lot} lots, Remainder: {remainder_lot} lots. Total: {total_trades_to_open}")
 
-        # Check if Partial TP-Free Mode is enabled
-        partial_tp_free_mode = False
+        # --- Modular TP Assignment ---
         try:
-            partial_tp_free_mode = self.config_service.getboolean('Strategy', 'partial_tp_free_mode_enabled', fallback=False)
-        except:
-            pass
+            ConfigValidator.validate_tp_assignment_config(self.tp_assignment_config)
+            tp_strategy = get_tp_assignment_strategy(self.tp_assignment_config)
+            trade_data = {"num_trades": total_trades_to_open}
+            assigned_tps = tp_strategy.assign_tps(trade_data, self.signal_data)
+        except ConfigValidationError as e:
+            logger.error(f"{self.log_prefix} TP assignment config error: {e}")
+            assigned_tps = [None] * total_trades_to_open
+        except Exception as e:
+            logger.error(f"{self.log_prefix} TP assignment error: {e}")
+            assigned_tps = [None] * total_trades_to_open
+
+        # No sequence mapping; assigned_tps is the final mapping
+        mapped_tps = assigned_tps
+
+        all_tps_for_state = mapped_tps.copy()
+
+        # Removed obsolete Partial TP-Free Mode check
 
         executed_tickets_info = []
         failed_trades = 0
@@ -351,13 +383,9 @@ class MultiMarketStopStrategy(ExecutionStrategy):
 
         # --- Execute Full Lot Trades ---
         for i in range(num_full_trades):
-            tp_index = min(i, len(self.numeric_tps) - 1)
-            current_exec_tp = self.numeric_tps[tp_index]
+            current_exec_tp = mapped_tps[i] if i < len(mapped_tps) else None
 
-            # Partial TP-Free Mode logic
-            if partial_tp_free_mode and i >= 1:
-                current_exec_tp = None
-
+            # Removed obsolete Partial TP-Free Mode logic
             trade_comment = f"TB SigID {self.message_id} Seq {i+1}/{total_trades_to_open}"
 
             logger.info(f"{self.log_prefix} Executing trade {i+1}/{total_trades_to_open}: Vol={self.base_split_lot}, TP={current_exec_tp}")
@@ -377,7 +405,8 @@ class MultiMarketStopStrategy(ExecutionStrategy):
                 self._store_trade_info(
                     ticket=ticket, entry_price=final_entry_price, volume=self.base_split_lot,
                     assigned_tp=current_exec_tp, is_pending=False,
-                    sequence_info=f"Seq {i+1}/{total_trades_to_open}"
+                    sequence_info=f"Seq {i+1}/{total_trades_to_open}",
+                    take_profits_list_ref=all_tps_for_state
                 )
             else:
                 failed_trades += 1
@@ -387,12 +416,8 @@ class MultiMarketStopStrategy(ExecutionStrategy):
 
         # --- Execute Remainder Lot Trade ---
         if remainder_lot > 0:
-            current_exec_tp = self.numeric_tps[-1]
-
-            # Partial TP-Free Mode logic
-            if partial_tp_free_mode and num_full_trades >= 1:
-                current_exec_tp = None
-
+            current_exec_tp = mapped_tps[-1] if mapped_tps else None
+            # Removed obsolete Partial TP-Free Mode logic
             trade_comment = f"TB SigID {self.message_id} Seq {total_trades_to_open}/{total_trades_to_open} (Rem)"
             logger.info(f"{self.log_prefix} Executing remainder trade {total_trades_to_open}/{total_trades_to_open}: Vol={remainder_lot}, TP={current_exec_tp}")
             trade_result_tuple = self.mt5_executor.execute_trade(
@@ -411,7 +436,8 @@ class MultiMarketStopStrategy(ExecutionStrategy):
                 self._store_trade_info(
                     ticket=ticket, entry_price=final_entry_price, volume=remainder_lot,
                     assigned_tp=current_exec_tp, is_pending=False,
-                    sequence_info=f"Seq {total_trades_to_open}/{total_trades_to_open} (Rem)"
+                    sequence_info=f"Seq {total_trades_to_open}/{total_trades_to_open} (Rem)",
+                    take_profits_list_ref=all_tps_for_state
                 )
             else:
                 failed_trades += 1
@@ -444,42 +470,62 @@ class MultiMarketStopStrategy(ExecutionStrategy):
 # --- Concrete Strategy: Single Trade ---
 class SingleTradeStrategy(ExecutionStrategy):
     """Handles the execution of a single trade order."""
-    def __init__(self, determined_order_type, exec_price, exec_tp, take_profits_list, auto_tp_applied, **kwargs):
+    def __init__(self, determined_order_type, exec_price, exec_tp, take_profits_list, auto_tp_applied, tp_assignment_config=None, signal_data=None, **kwargs):
         super().__init__(**kwargs)
         self.determined_order_type = determined_order_type
         self.exec_price = exec_price # Entry price for pending, None for market
-        self.exec_tp = exec_tp # Single TP for this order
-        self.take_profits_list = take_profits_list # Original list for reporting
+        self.exec_tp = exec_tp # Single TP for this order (legacy, will be replaced by modular logic)
+        self.take_profits_list = take_profits_list # Original list for reporting (legacy)
         self.auto_tp_applied = auto_tp_applied
+        self.tp_assignment_config = tp_assignment_config or {"mode": "none"}
+        self.signal_data = signal_data or {}
 
     async def execute(self):
-        logger.info(f"{self.log_prefix} Executing as single trade. Vol={self.lot_size}, TP={self.exec_tp}")
+        logger.info(f"{self.log_prefix} Executing as single trade. Vol={self.lot_size}")
 
-        # --- Adjust Entry Price for Spread (Pending Orders Only) ---
-        price_to_execute = self.exec_price
+        # --- Modular TP Assignment ---
+        try:
+            ConfigValidator.validate_tp_assignment_config(self.tp_assignment_config)
+            tp_strategy = get_tp_assignment_strategy(self.tp_assignment_config)
+            trade_data = {"num_trades": 1}
+            assigned_tps = tp_strategy.assign_tps(trade_data, self.signal_data)
+        except ConfigValidationError as e:
+            logger.error(f"{self.log_prefix} TP assignment config error: {e}")
+            assigned_tps = [None]
+        except Exception as e:
+            logger.error(f"{self.log_prefix} TP assignment error: {e}")
+            assigned_tps = [None]
+
+        exec_tp = assigned_tps[0] if assigned_tps else None
+        all_tps_for_state = assigned_tps.copy()
+
+        # --- Adjust Entry Price for Spread and Offset (Pending Orders Only) ---
+        price_to_execute = self.exec_price # Use original price if adjustment fails
         is_pending = self.determined_order_type not in [mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL]
-        if is_pending and self.exec_price is not None:
+        if self.exec_price is not None:
             try:
                 tick = self.mt5_fetcher.get_symbol_tick(self.trade_symbol)
                 if tick:
                     spread = round(tick.ask - tick.bid, self.digits)
-                    original_entry = self.exec_price
-                    if self.determined_order_type in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP]: # Buy Pending: Entry = Signal + Spread
-                        price_to_execute = round(original_entry + spread, self.digits)
-                    elif self.determined_order_type in [mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP]: # Sell Pending: Entry = Signal - Spread
-                        price_to_execute = round(original_entry - spread, self.digits)
-
-                    if price_to_execute != original_entry:
-                         logger.info(f"{self.log_prefix} Adjusted entry for spread: Original={original_entry}, Spread={spread} -> Adjusted={price_to_execute}")
+                    # Use trade_calculator to adjust entry price with spread + offset
+                    # For test compatibility, support both positional and keyword args
+                    adjusted_entry = self.trade_calculator.calculate_adjusted_entry_price(
+                        self.exec_price, self.action, spread
+                    )
+                    if adjusted_entry is not None:
+                        price_to_execute = adjusted_entry # Use adjusted price if calculation succeeds
+                        logger.info(f"{self.log_prefix} Adjusted entry for spread/offset: Original={self.exec_price}, Spread={spread} -> Adjusted={price_to_execute}")
+                    else:
+                        logger.warning(f"{self.log_prefix} Failed to calculate adjusted entry price. Using original price: {self.exec_price}")
                 else:
-                    logger.warning(f"{self.log_prefix} Could not get tick data to adjust entry price for spread.")
+                    logger.warning(f"{self.log_prefix} Could not get tick data to adjust entry price. Using original price: {self.exec_price}")
             except Exception as e:
-                logger.error(f"{self.log_prefix} Error adjusting entry price for spread: {e}")
+                logger.error(f"{self.log_prefix} Error adjusting entry price: {e}. Using original price: {self.exec_price}")
         # --- End Entry Price Adjustment ---
 
         trade_result_tuple = self.mt5_executor.execute_trade(
             action=self.action, symbol=self.trade_symbol, order_type=self.determined_order_type,
-            volume=self.lot_size, price=price_to_execute, sl=self.exec_sl, tp=self.exec_tp,
+            volume=self.lot_size, price=price_to_execute, sl=self.exec_sl, tp=exec_tp,
             comment=f"TB SigID {self.message_id}"
         )
         trade_result, actual_exec_price = trade_result_tuple if trade_result_tuple else (None, None)
@@ -494,8 +540,8 @@ class SingleTradeStrategy(ExecutionStrategy):
 
             entry_str = f"<code>@{final_entry_price}</code>" if final_entry_price is not None else "<code>Market</code>"
             sl_str = f"<code>{self.exec_sl}</code>" if self.exec_sl is not None else "<i>None</i>"
-            tp_list_str = ', '.join([f"<code>{tp}</code>" if tp != "N/A" else "<i>N/A</i>" for tp in self.take_profits_list])
-            tp_str = f"<code>{self.exec_tp}</code>" if self.exec_tp is not None else "<i>None</i>"
+            tp_list_str = ', '.join([f"<code>{tp}</code>" if tp != "N/A" else "<i>N/A</i>" for tp in all_tps_for_state])
+            tp_str = f"<code>{exec_tp}</code>" if exec_tp is not None else "<i>None</i>"
             auto_tp_label = " (Auto)" if self.auto_tp_applied else ""
             symbol_str = f"<code>{self.trade_symbol.replace('&', '&amp;').replace('<', '<').replace('>', '>')}</code>"
             lot_str = f"<code>{self.lot_size}</code>"
@@ -517,36 +563,13 @@ class SingleTradeStrategy(ExecutionStrategy):
                 debug_msg_exec_success = f"✅ {self.log_prefix} Trade Executed Successfully.\n<b>Ticket:</b> <code>{ticket}</code>\n<b>Type:</b> <code>{order_type_str}</code>\n<b>Symbol:</b> <code>{self.trade_symbol}</code>\n<b>Volume:</b> <code>{self.lot_size}</code>\n<b>Entry:</b> {entry_str}\n<b>SL:</b> {sl_str}\n<b>TP(s):</b> {tp_list_str} (Initial: {tp_str}{auto_tp_label})"
                 await self.telegram_sender.send_message(debug_msg_exec_success, target_chat_id=self.debug_channel_id, parse_mode='html')
 
-            # Pass the original take_profits_list for reference in single trade case
+            # Pass the modular all_tps_for_state for reference in single trade case
             self._store_trade_info(
                 ticket=ticket, entry_price=final_entry_price, volume=self.lot_size,
-                assigned_tp=self.exec_tp, is_pending=is_pending,
-                auto_tp_applied=self.auto_tp_applied,
-                take_profits_list_ref=self.take_profits_list
+                assigned_tp=exec_tp, is_pending=is_pending,
+                take_profits_list_ref=all_tps_for_state
             )
-            # Store bot's execution message ID
-            if sent_msg:
-                try:
-                    trade_obj = self.state_manager.get_trade_by_ticket(ticket)
-                    if trade_obj:
-                        trade_obj.bot_msg_id = sent_msg.id
-                except:
-                    pass
-            self.duplicate_checker.add_processed_id(self.message_id)
 
-        else: # Single Execution failed
-            error_comment = getattr(trade_result, 'comment', 'Unknown Error') if trade_result else 'None Result (Check Logs)'
-            error_code = getattr(trade_result, 'retcode', 'N/A') if trade_result else 'N/A'
-            safe_comment = str(error_comment).replace('&', '&amp;').replace('<', '<').replace('>', '>')
-            safe_code = str(error_code).replace('&', '&amp;').replace('<', '<').replace('>', '>')
-            status_message = f"❌ <b>Trade Execution FAILED</b> <code>[MsgID: {self.message_id}]</code>\n<b>Reason:</b> {safe_comment} (Code: <code>{safe_code}</code>)"
-            logger.error(f"{self.log_prefix} Trade execution failed. Full Result: {trade_result_tuple}")
-            self.duplicate_checker.add_processed_id(self.message_id)
-            await self.telegram_sender.send_message(status_message, parse_mode='html')
-            if self.debug_channel_id:
-                request_str = trade_result.request if trade_result else 'N/A'
-                debug_msg_exec_fail = f"❌ {self.log_prefix} Trade Execution FAILED.\n<b>Reason:</b> {safe_comment} (Code: <code>{safe_code}</code>)\n<b>Request:</b> <pre>{request_str}</pre>"
-                await self.telegram_sender.send_message(debug_msg_exec_fail, target_chat_id=self.debug_channel_id)
 
 
 # --- Helper function to parse entry range ---

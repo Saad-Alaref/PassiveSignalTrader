@@ -126,6 +126,14 @@ async def process_new_signal(signal_data: SignalData, message_id, state_manager:
     debug_channel_id = getattr(telegram_sender, 'debug_target_channel_id', None)
 
     try:
+        # --- Duplicate Check ---
+        if duplicate_checker.is_duplicate(message_id):
+            logger.info(f"{log_prefix} Duplicate message ID {message_id} detected. Skipping.")
+            if debug_channel_id:
+                await telegram_sender.send_message(f"🔄 {log_prefix} Duplicate message ID {message_id} detected. Skipped.", target_chat_id=debug_channel_id)
+            return # Stop processing if duplicate
+        # --- End Duplicate Check ---
+
         if not signal_data:
              logger.error(f"{log_prefix} New signal type but no data found. Ignoring.")
              duplicate_checker.add_processed_id(message_id) # Mark as processed
@@ -219,6 +227,79 @@ async def process_new_signal(signal_data: SignalData, message_id, state_manager:
 
         # --- Determine SL/TP for Execution based on Strategy ---
         exec_sl = None if sl_price == "N/A" else float(sl_price)
+        auto_sl_applied_initial = False # Flag to track if AutoSL was applied here
+
+        # --- Apply AutoSL if enabled and no SL found ---
+        logger.debug(f"{log_prefix} Checking AutoSL conditions. Initial exec_sl: {exec_sl}")
+        if exec_sl is None: # Only apply if no SL was found from signal
+            enable_auto_sl = config_service_instance.getboolean('AutoSL', 'enable_auto_sl', fallback=False)
+            logger.debug(f"{log_prefix} AutoSL enabled in config: {enable_auto_sl}")
+            if enable_auto_sl:
+                logger.info(f"{log_prefix} No SL found in signal and AutoSL enabled. Attempting to calculate AutoSL...")
+                auto_sl_risk_pips = config_service_instance.getfloat('AutoSL', 'auto_sl_risk_pips', fallback=40.0)
+
+                # Determine entry price for calculation (similar to AutoTP logic)
+                calc_entry_price_sl = None
+                if determined_order_type in [mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL]: # Market Order
+                    tick_sl = mt5_fetcher.get_symbol_tick(trade_symbol)
+                    if tick_sl:
+                        # Use the price the market order would likely fill at
+                        calc_entry_price_sl = tick_sl.ask if determined_order_type == mt5.ORDER_TYPE_BUY else tick_sl.bid
+                    else:
+                        logger.error(f"{log_prefix} Cannot calculate AutoSL for market order: Failed to get current tick for {trade_symbol}.")
+                else: # Pending Order
+                    calc_entry_price_sl = exec_price # Use the calculated pending entry price
+
+                if calc_entry_price_sl is not None:
+                    # Adjust entry price for spread/offset before calculating SL distance
+                    spread_sl = 0.0
+                    direction_str_sl = 'BUY' if determined_order_type in [mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP] else 'SELL'
+                    tick_for_spread_sl = mt5_fetcher.get_symbol_tick(trade_symbol) # Fetch fresh tick
+
+                    if tick_for_spread_sl and tick_for_spread_sl.ask and tick_for_spread_sl.bid:
+                        spread_sl = abs(tick_for_spread_sl.ask - tick_for_spread_sl.bid)
+                    else:
+                        spread_sl = 0.0 # fallback
+
+                    try:
+                        # Use the same adjusted price logic as AutoTP
+                        adjusted_entry_price_sl = trade_calculator.calculate_adjusted_entry_price(
+                            symbol=trade_symbol, # Pass symbol here
+                            original_price=calc_entry_price_sl,
+                            direction=direction_str_sl,
+                            spread=spread_sl
+                        )
+                        if adjusted_entry_price_sl is not None:
+                             logger.info(f"{log_prefix} Adjusted entry price for AutoSL calc: {adjusted_entry_price_sl}")
+                             calc_entry_price_sl = adjusted_entry_price_sl # Use adjusted price for SL calc
+                        else:
+                             logger.warning(f"{log_prefix} Failed to adjust entry price for AutoSL calc. Using original: {calc_entry_price_sl}")
+                    except Exception as adj_err:
+                        logger.warning(f"{log_prefix} Error adjusting entry price for AutoSL calc: {adj_err}. Using original: {calc_entry_price_sl}")
+
+                    # Calculate AutoSL using the (potentially adjusted) entry price
+                    auto_sl_price = trade_calculator.calculate_sl_from_pips( # Use correct method
+                        symbol=trade_symbol,
+                        order_type=determined_order_type,
+                        entry_price=calc_entry_price_sl, # Use the determined/adjusted entry
+                        sl_distance_pips=auto_sl_risk_pips # Pass pips distance
+                    )
+                    if auto_sl_price is not None:
+                        exec_sl = auto_sl_price # Use the calculated AutoSL
+                        auto_sl_applied_initial = True
+                        logger.info(f"{log_prefix} Calculated and applied AutoSL: {exec_sl} (Distance: {auto_sl_risk_pips} pips)")
+                    else:
+                        logger.error(f"{log_prefix} Failed to calculate AutoSL price. AutoSL will not be applied.")
+                else:
+                    logger.error(f"{log_prefix} Cannot calculate AutoSL: Could not determine entry price for calculation. AutoSL will not be applied.")
+            else:
+                logger.debug(f"{log_prefix} AutoSL is disabled in config. Skipping.")
+        else:
+            logger.debug(f"{log_prefix} Signal already has an SL ({exec_sl}). Skipping AutoSL.")
+
+        logger.debug(f"{log_prefix} Final exec_sl before sending order: {exec_sl}")
+        # --- End AutoSL ---
+
         exec_tp = None # Initialize TP for the order
         tp_strategy = config_service_instance.get('Strategy', 'tp_execution_strategy', fallback='first_tp_full_close').lower() # Use service
         valid_tps = [tp for tp in take_profits_list if tp != "N/A"] # Filter out "N/A"
@@ -256,7 +337,7 @@ async def process_new_signal(signal_data: SignalData, message_id, state_manager:
             logger.debug(f"{log_prefix} AutoTP enabled in config: {enable_auto_tp}") # Log config state
             if enable_auto_tp:
                 logger.info(f"{log_prefix} No TP found in signal and AutoTP enabled. Attempting to calculate AutoTP...")
-                auto_tp_distance = config_service_instance.getfloat('AutoTP', 'auto_tp_price_distance', fallback=10.0) # Use service
+                auto_tp_distance_pips = config_service_instance.getfloat('AutoTP', 'auto_tp_distance_pips', fallback=80.0) # Use service, read pips
 
                 # Determine entry price for calculation
                 calc_entry_price = None
@@ -303,12 +384,12 @@ async def process_new_signal(signal_data: SignalData, message_id, state_manager:
                         symbol=trade_symbol,
                         order_type=determined_order_type,
                         entry_price=calc_entry_price,
-                        tp_price_distance=auto_tp_distance
+                        tp_distance_pips=auto_tp_distance_pips # Pass pips distance
                     )
                     if auto_tp_price is not None:
                         exec_tp = auto_tp_price # Use the calculated AutoTP
                         auto_tp_applied = True
-                        logger.info(f"{log_prefix} Calculated and applied AutoTP: {exec_tp} (Distance: {auto_tp_distance})")
+                        logger.info(f"{log_prefix} Calculated and applied AutoTP: {exec_tp} (Distance: {auto_tp_distance_pips} pips)")
                         # Update take_profits_list for status message and state storage
                         take_profits_list = [exec_tp]
                     else:
@@ -468,6 +549,31 @@ async def process_new_signal(signal_data: SignalData, message_id, state_manager:
             determined_order_type in [mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL, mt5.ORDER_TYPE_BUY_STOP, mt5.ORDER_TYPE_SELL_STOP]
         )
 
+        # --- Load TP Assignment Config ---
+        tp_assignment_config = {}
+        try:
+            if config_service_instance.config.has_section('TPAssignment'):
+                tp_assignment_config = dict(config_service_instance.config['TPAssignment'])
+                logger.info(f"{log_prefix} Loaded TPAssignment config: {tp_assignment_config}")
+                # For custom_mapping mode, parse the mapping string into a list
+                if tp_assignment_config.get("mode") == "custom_mapping":
+                    mapping_str = tp_assignment_config.get("mapping", "")
+                    # Example: mapping = "0,none,1"
+                    mapping = []
+                    for item in mapping_str.split(","):
+                        item = item.strip()
+                        if item.isdigit():
+                            mapping.append(int(item))
+                        elif item.lower() == "none":
+                            mapping.append("none")
+                    tp_assignment_config["mapping"] = mapping
+            else:
+                logger.warning(f"{log_prefix} [TPAssignment] section not found in config. Using default TP assignment (none).")
+                tp_assignment_config = {'mode': 'none'}
+        except Exception as cfg_err:
+            logger.error(f"{log_prefix} Error loading TPAssignment config: {cfg_err}. Using default TP assignment.", exc_info=True)
+            tp_assignment_config = {'mode': 'none'}
+
         # --- Instantiate and Execute Strategy ---
         strategy_instance = None
         common_args = {
@@ -476,25 +582,39 @@ async def process_new_signal(signal_data: SignalData, message_id, state_manager:
             "config_service_instance": config_service_instance, "mt5_fetcher": mt5_fetcher, "mt5_executor": mt5_executor, # Pass service instance
             "state_manager": state_manager, "telegram_sender": telegram_sender,
             "duplicate_checker": duplicate_checker, "log_prefix": log_prefix,
-            "trade_calculator": trade_calculator
+            "trade_calculator": trade_calculator,
+            "auto_sl_applied_initial": auto_sl_applied_initial # Pass the flag
         }
 
         try:
+            # Define tp_sequence for strategies that require it
+            tp_sequence = numeric_tps
             if use_distributed_limits:
                 strategy_instance = DistributedLimitsStrategy(
-                    entry_price_raw=entry_price_raw, **common_args
+                    entry_price_raw=entry_price_raw,
+                    tp_assignment_config=tp_assignment_config,
+                    # tp_sequence=tp_sequence, # Obsolete parameter
+                    signal_data=signal_data,
+                    **common_args
                 )
             elif use_multi_trade_market_stop:
                  strategy_instance = MultiMarketStopStrategy(
                     determined_order_type=determined_order_type, exec_price=exec_price,
+                    tp_assignment_config=tp_assignment_config,
+                    # tp_sequence=tp_sequence, # Obsolete parameter
+                    signal_data=signal_data,
                     **common_args
                 )
             else:
                 # Default to single trade execution
+                # Remove auto_sl_applied_initial from direct args to avoid duplicate with **common_args
                 strategy_instance = SingleTradeStrategy(
                     determined_order_type=determined_order_type, exec_price=exec_price,
                     exec_tp=exec_tp, take_profits_list=take_profits_list,
-                    auto_tp_applied=auto_tp_applied, **common_args
+                    auto_tp_applied=auto_tp_applied,
+                    tp_assignment_config=tp_assignment_config,
+                    signal_data=signal_data,
+                    **common_args
                 )
 
             # Execute the chosen strategy

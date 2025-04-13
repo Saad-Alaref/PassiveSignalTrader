@@ -75,12 +75,12 @@ class ConfigService:
             else:
                  raise ValueError(f"Invalid boolean value for [{section}]{option} and no fallback provided.") from e
 
-    def get_entry_price_offset(self):
+    def get_entry_price_offset_pips(self):
         """
-        Returns the configured entry price offset (float).
+        Returns the configured entry price offset in PIPS (float).
         Defaults to 0.0 if missing or invalid.
         """
-        return self.getfloat('Trading', 'entry_price_offset', fallback=0.0)
+        return self.getfloat('Trading', 'entry_price_offset_pips', fallback=0.0)
     
     def reload_config(self):
         """Reloads the configuration from the file."""

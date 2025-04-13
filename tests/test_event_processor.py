@@ -103,6 +103,64 @@ async def test_process_new_signal_runs(mock_deps):
             mock_deps['mt5_fetcher']
         )
         # mock_instance.execute.assert_awaited()
+    
+    @pytest.mark.asyncio
+    async def test_process_new_signal_autosl_pips(mock_deps):
+        # Arrange: signal with missing SL, config enables AutoSL with pip-based SL
+        signal_data = MagicMock()
+        signal_data.is_signal = True
+        signal_data.action = "BUY"
+        signal_data.entry_type = "Market"
+        signal_data.entry_price = 2000.0
+        signal_data.stop_loss = None  # No SL provided
+        signal_data.take_profits = [2010.0]
+        signal_data.symbol = "XAUUSD"
+        signal_data.sentiment_score = 0.8
+    
+        # Patch config to enable AutoSL and set pip-based SL
+        mock_deps['config_service_instance'].getboolean.side_effect = lambda section, key, fallback=False: True if key == 'enable_auto_sl' else fallback
+        mock_deps['config_service_instance'].getfloat.side_effect = lambda section, key, fallback=None: 40.0 if key == 'auto_sl_risk_pips' else fallback
+    
+        # Patch trade_calculator to return a known SL
+        mock_deps['trade_calculator'].calculate_sl_from_pips.return_value = 1996.0
+    
+        # Patch mt5_executor to capture the trade request
+        trade_request = {}
+        def mock_execute_trade(*args, **kwargs):
+            # Capture exec_sl from kwargs or positional args
+            nonlocal trade_request
+            if args:
+                # If exec_sl is a positional argument
+                trade_request['exec_sl'] = args[4] if len(args) > 4 else kwargs.get('exec_sl')
+            else:
+                trade_request['exec_sl'] = kwargs.get('exec_sl')
+            mock_result = MagicMock()
+            mock_result.retcode = mt5.TRADE_RETCODE_DONE
+            mock_result.order = 123456
+            return (mock_result, 2000.0)
+        mock_deps['mt5_executor'].execute_trade.side_effect = mock_execute_trade
+    
+        # Act
+        await ep.process_new_signal(
+            signal_data,
+            12345,
+            mock_deps['state_manager'],
+            mock_deps['decision_logic'],
+            mock_deps['trade_calculator'],
+            mock_deps['mt5_executor'],
+            mock_deps['telegram_sender'],
+            mock_deps['duplicate_checker'],
+            mock_deps['config_service_instance'],
+            "TestPrefix",
+            mock_deps['mt5_fetcher']
+        )
+    
+        # Assert
+        mock_deps['trade_calculator'].calculate_sl_from_pips.assert_called_once_with(
+            "XAUUSD", mt5.ORDER_TYPE_BUY, 2000.0, 40.0
+        )
+        # The trade request should have exec_sl set to the calculated SL
+        assert trade_request['exec_sl'] == 1996.0
 
 @pytest.mark.asyncio
 async def test_process_update_runs(mock_deps):

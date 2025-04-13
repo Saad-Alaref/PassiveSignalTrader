@@ -46,13 +46,13 @@ class TradeInfo:
     entry_price: OptionalPrice # Actual entry price (float) or pending price
     initial_sl: OptionalPrice
     original_volume: VolumeType # Volume of this specific trade/order
-    all_tps: List[PriceType] # List containing only the TP assigned to this specific trade/order
-    tp_strategy: str # e.g., 'sequential_partial_close', 'first_tp_full_close'
-    assigned_tp: OptionalPrice # The specific TP set for this ticket in MT5
+    all_tps: List[PriceType] # List of TPs assigned by the TP strategy (e.g., [None], [3112, None], [3112, 3120])
+    # tp_strategy: str # Obsolete: TP strategy is now determined by [TPAssignment] config
+    assigned_tp: OptionalPrice # The specific TP set for this ticket in MT5 (often the first element of all_tps or None)
     is_pending: bool = False # True if it's a pending order not yet filled
     tsl_active: bool = False
-    auto_tp_applied: bool = False
-    next_tp_index: int = 0 # Primarily relevant for the old partial close strategy
+    auto_tp_applied: bool = False # Was AutoTP used initially? (Now less relevant with TPAssignment)
+    # next_tp_index: int = 0 # Obsolete: TP handling logic removed from TradeManager
     sequence_info: Optional[str] = None # e.g., "Seq 1/3", "Dist 2/5"
     auto_sl_pending_timestamp: Optional[TimestampType] = None
     auto_be_applied: bool = False

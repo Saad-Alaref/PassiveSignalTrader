@@ -143,18 +143,20 @@ class LLMInterface:
         prompt = self._prepare_prompt(message_text, context, prompt_type) # Pass context
         content_parts = [prompt]
 
-        # Handle image data if the model supports vision and image data is provided
-        if self.supports_vision and image_data:
-            try:
-                img = Image.open(io.BytesIO(image_data))
-                # Prepend image part - order might matter depending on model/prompt
-                content_parts.insert(0, img)
-                logger.debug("Image data added to Gemini request.")
-            except Exception as e:
-                logger.error(f"Failed to process image data for Gemini: {e}", exc_info=True)
-                # Decide whether to proceed without image or fail
-                # Proceeding without image for now
-                logger.warning("Proceeding with Gemini analysis using text only.")
+        # --- Image Handling Disabled ---
+        # # Handle image data if the model supports vision and image data is provided
+        # if self.supports_vision and image_data:
+        #     try:
+        #         img = Image.open(io.BytesIO(image_data))
+        #         # Prepend image part - order might matter depending on model/prompt
+        #         content_parts.insert(0, img)
+        #         logger.debug("Image data added to Gemini request.")
+        #     except Exception as e:
+        #         logger.error(f"Failed to process image data for Gemini: {e}", exc_info=True)
+        #         # Decide whether to proceed without image or fail
+        #         # Proceeding without image for now
+        #         logger.warning("Proceeding with Gemini analysis using text only.")
+        # --- End Image Handling Disabled ---
 
         retries = 0
         while retries < MAX_RETRIES:

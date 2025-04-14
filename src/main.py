@@ -360,10 +360,6 @@ async def periodic_mt5_monitor_task(interval_seconds=60):
                     except Exception as e:
                         logger.error(f"Error during periodic AutoBE check for ticket {ticket}: {e}", exc_info=True)
 
-                    try:
-                        await trade_manager.check_and_handle_tp_hits(current_position, trade_info)
-                    except Exception as e:
-                        logger.error(f"Error during periodic TP check for ticket {ticket}: {e}", exc_info=True)
 
                     # --- Add Trailing Stop Check ---
                     try:

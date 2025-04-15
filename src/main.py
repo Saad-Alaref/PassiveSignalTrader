@@ -115,9 +115,6 @@ async def handle_telegram_event(event):
         message_text = getattr(event, 'text', '')
         is_edit = isinstance(event, events.MessageEdited.Event)
         reply_to_msg_id = getattr(event, 'reply_to_msg_id', None)
-        image_data = None
-
-        # TODO: Handle image data if message has photo
 
         log_prefix = f"[MsgID: {message_id}{' (Edit)' if is_edit else ''}{f' (Reply to {reply_to_msg_id})' if reply_to_msg_id else ''}]"
         logger.info(f"{log_prefix} Received event. Text: '{message_text[:80]}...'")
@@ -163,7 +160,7 @@ async def handle_telegram_event(event):
             try: # Add try block around analysis
                 # --- Call Analyzer with Context ---
                 # Always pass None for image_data to disable image analysis
-                analysis_result = signal_analyzer.analyze(message_text, image_data=None, context=llm_context)
+                analysis_result = signal_analyzer.analyze(message_text, context=llm_context)
                 analysis_type = analysis_result.get('type')
                 logger.info(f"{log_prefix} Signal analysis result type: {analysis_type}")
                 # Send analysis debug message
@@ -243,7 +240,7 @@ async def handle_telegram_event(event):
                  config_service_instance=config_service, # Pass service instance
                  log_prefix=log_prefix,
                  llm_context=llm_context, # Pass context for potential re-analysis
-                 image_data=image_data # Pass image data
+                 # image_data=image_data # Removed image data passing
              )
 
 

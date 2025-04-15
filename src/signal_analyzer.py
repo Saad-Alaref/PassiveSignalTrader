@@ -67,13 +67,13 @@ class SignalAnalyzer:
             logger.warning(f"Invalid numeric {field_name} '{value_raw}'. Treating as N/A.")
             return "N/A"
 
-    def analyze(self, message_text, image_data=None, context=None, analysis_mode=None):
+    def analyze(self, message_text, context=None, analysis_mode=None):
         """
         Analyzes a message using an LLM to classify it and extract details.
 
         Args:
             message_text (str): The text content of the message.
-            image_data (bytes, optional): Image data associated with the message.
+            # image_data parameter removed
             context (dict, optional): Additional context (price, history, trades). Defaults to None.
             analysis_mode (str, optional): Hint for analysis type (e.g., 'extract_update_params' for edits). Defaults to None. (Currently unused).
 
@@ -90,10 +90,10 @@ class SignalAnalyzer:
         # Always use the main analysis prompt. The LLM should understand the context of an edit/reply.
         prompt_type_to_use = "analyze_signal"
 
-        # Ignore image_data, only analyze text
+        # Image data handling removed
         llm_result = self.llm.analyze_message(
             message_text=message_text,
-            image_data=None,
+            # image_data=None, # Argument removed
             context=context, # Pass context
             prompt_type=prompt_type_to_use # Pass determined prompt type
         )
@@ -223,14 +223,14 @@ class SignalAnalyzer:
     # --- Deprecated analyze_update method ---
     # Kept for reference or potential future use, but currently bypassed by main analyze logic
     # We might remove it later, but update signature for now.
-    def analyze_update(self, message_text, image_data=None, context=None):
+    def analyze_update(self, message_text, context=None):
         """
         DEPRECATED: Analyzes a message specifically for update parameters (SL/TP).
         Use the main analyze method with appropriate context/mode instead.
         """
         logger.warning("analyze_update method is deprecated. Using main analyze method.")
         # Call analyze with the appropriate prompt type (or let analyze decide)
-        result = self.analyze(message_text, image_data, context)
+        result = self.analyze(message_text, context) # Removed image_data argument
         if result and result['type'] == 'update':
             return result['data'] # Return only the UpdateData object
         else:

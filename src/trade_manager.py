@@ -490,7 +490,7 @@ class TradeManager:
                     move_sl = True
 
             if move_sl:
-                logger.info(f"{log_prefix_tsl} Price moved favorably. Updating TSL from {current_sl} to {new_tsl_price}...")
+                logger.info(f"{log_prefix_tsl} New TSL ({new_tsl_price}) is better than SL at start of check ({current_sl}). Updating...")
                 modify_success = self.mt5_executor.modify_trade(ticket=ticket, sl=new_tsl_price)
 
                 if modify_success:

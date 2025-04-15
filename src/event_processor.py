@@ -647,7 +647,7 @@ async def process_new_signal(signal_data: SignalData, message_id, state_manager:
 async def process_update(analysis_result: dict, event, state_manager: StateManager, # analysis_result is still dict {'type': 'update', 'data': UpdateData}
                          signal_analyzer: SignalAnalyzer, mt5_executor: MT5Executor,
                          telegram_sender: TelegramSender, duplicate_checker: DuplicateChecker,
-                         config_service_instance, log_prefix, llm_context, image_data):
+                         config_service_instance, log_prefix, llm_context): # Removed image_data parameter
     """Processes a potential update message (from analysis or edit/reply)."""
     debug_channel_id = getattr(telegram_sender, 'debug_target_channel_id', None)
     message_id = event.id
@@ -767,7 +767,7 @@ async def process_update(analysis_result: dict, event, state_manager: StateManag
                     logger.info(f"{log_prefix} Re-analyzing edit/reply text using LLM...")
                     # Re-analyze using the standard prompt; LLM should handle edit/reply context
                     update_analysis_result = signal_analyzer.analyze(
-                        message_text, image_data=None, context=llm_context
+                        message_text, context=llm_context # Removed image_data argument
                     )
                 logger.debug(f"{log_prefix} Re-analysis result for edit/reply: {update_analysis_result}")
 

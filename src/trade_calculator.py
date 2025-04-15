@@ -412,20 +412,21 @@ class TradeCalculator:
         # Round the final SL price to the symbol's digits
         sl_price_rounded = round(sl_price, digits)
 
-        # Create the format specifier string safely
+        # Format the price distance for logging
+        formatted_sl_distance_price = str(sl_distance_price) # Default to string representation
         try:
-            price_format_specifier = f":.{int(digits)}f"
-        except (ValueError, TypeError):
-            logger.warning(f"{log_prefix} Could not determine valid digits ({digits}) for formatting. Using default float format.")
-            price_format_specifier = ":.5f" # Default to 5 decimal places if digits is invalid
+            # Ensure digits is a valid integer for formatting
+            valid_digits = int(digits)
+            # Ensure sl_distance_price is a float
+            valid_sl_distance_price = float(sl_distance_price)
+            # Create the format specifier dynamically
+            price_format_specifier = f".{valid_digits}f"
+            # Apply formatting
+            formatted_sl_distance_price = format(valid_sl_distance_price, price_format_specifier)
+        except (ValueError, TypeError) as fmt_err:
+            logger.warning(f"{log_prefix} Could not format sl_distance_price ({sl_distance_price}) with digits ({digits}): {fmt_err}. Using raw string value for log.")
+            # formatted_sl_distance_price remains the raw string representation from line 416
 
-        # Use the pre-built format specifier and ensure the value is a float for formatting
-        try:
-            # Explicitly convert sl_distance_price to float before formatting
-            formatted_sl_distance_price = f"{float(sl_distance_price):{price_format_specifier}}"
-        except (ValueError, TypeError):
-            logger.warning(f"{log_prefix} Could not format sl_distance_price ({sl_distance_price}). Using raw value.")
-            formatted_sl_distance_price = str(sl_distance_price) # Fallback to string representation
         logger.info(f"{log_prefix} Calculated Trailing SL for {symbol} {order_type}: CurrentPrice={current_price}, Distance={trail_distance_pips} pips ({formatted_sl_distance_price} price) -> SL Price={sl_price_rounded}")
         return sl_price_rounded
 

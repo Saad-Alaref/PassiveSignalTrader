@@ -42,3 +42,5 @@ This document tracks the current focus of work, recent changes, and open questio
 - What is the best deployment strategy (local, server, cloud)?
 - How to add advanced analytics, dashboards, or GUI interfaces?
 - **Continue increasing test coverage** across remaining modules (e.g., `config_service`, `llm_interface`, `mt5_connector`, `telegram_sender`).
+- **[2025-04-15 13:23] Removed Image Handling Code:** Removed all `image_data` parameters and related logic from `main.py`, `llm_interface.py`, `signal_analyzer.py`, and `event_processor.py` to completely eliminate image processing capabilities.
+- **[2025-04-15 13:32] Fixed Trailing Stop Loss (TSL) Logging:** Reviewed TSL logic in `src/trade_manager.py` and `src/trade_calculator.py`. Confirmed core logic is sound (pip-based, one-way movement). Fixed misleading log message in `trade_manager.py` regarding the 'from' SL value during updates. Fixed a formatting warning in `trade_calculator.py`'s logging of price distance.

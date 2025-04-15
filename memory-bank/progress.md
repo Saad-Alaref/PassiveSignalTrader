@@ -57,3 +57,12 @@ This document tracks major milestones, completed tasks, and ongoing work.
 - Rewrote `tests/test_tp_assignment.py` with comprehensive unit tests for the new TP modes.
 - Created `tests/test_trade_execution_integration.py` with advanced integration tests simulating realistic signal-to-trade scenarios, including TP assignment and entry/SL adjustments.
 - Updated Memory Bank (`systemPatterns.md`, `decisionLog.md`, `activeContext.md`, `progress.md`) to reflect all changes.
+
+### [2025-04-15 13:23] - Removed Image Handling Code
+- Removed `image_data` parameters and related logic from function signatures and calls in `src/main.py`, `src/llm_interface.py`, `src/signal_analyzer.py`, and `src/event_processor.py`.
+- This completely removes any capability for the bot to process or analyze image data from Telegram messages, ensuring only text is handled.
+
+### [2025-04-15 13:32] - Fixed Trailing Stop Loss (TSL) Logging
+- Reviewed TSL implementation in `src/trade_manager.py` and `src/trade_calculator.py`. Confirmed core logic remains sound (pip-based, one-way movement).
+- Corrected misleading log message in `trade_manager.py` (line 493) to accurately reflect the SL value used for comparison during TSL updates.
+- Fixed formatting logic in `trade_calculator.py` (lines 415-429) to prevent warnings when logging calculated price distances.

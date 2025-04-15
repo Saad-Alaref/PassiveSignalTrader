@@ -122,13 +122,13 @@ class LLMInterface:
         return prompt.strip()
 
 
-    def analyze_message(self, message_text, image_data=None, context=None, prompt_type="analyze_signal"):
+    def analyze_message(self, message_text, context=None, prompt_type="analyze_signal"):
         """
-        Sends message content (and optionally image) to the Gemini API for analysis.
+        Sends message content to the Gemini API for analysis.
 
         Args:
             message_text (str): The text content of the Telegram message.
-            image_data (bytes, optional): The byte content of an image, if present. Defaults to None.
+            # image_data parameter removed
             context (dict, optional): Additional context (price, history, trades). Defaults to None.
             prompt_type (str): The type of analysis requested ("analyze_signal", "analyze_edit_update").
 
@@ -143,20 +143,7 @@ class LLMInterface:
         prompt = self._prepare_prompt(message_text, context, prompt_type) # Pass context
         content_parts = [prompt]
 
-        # --- Image Handling Disabled ---
-        # # Handle image data if the model supports vision and image data is provided
-        # if self.supports_vision and image_data:
-        #     try:
-        #         img = Image.open(io.BytesIO(image_data))
-        #         # Prepend image part - order might matter depending on model/prompt
-        #         content_parts.insert(0, img)
-        #         logger.debug("Image data added to Gemini request.")
-        #     except Exception as e:
-        #         logger.error(f"Failed to process image data for Gemini: {e}", exc_info=True)
-        #         # Decide whether to proceed without image or fail
-        #         # Proceeding without image for now
-        #         logger.warning("Proceeding with Gemini analysis using text only.")
-        # --- End Image Handling Disabled ---
+        # --- Image Handling Removed ---
 
         retries = 0
         while retries < MAX_RETRIES:

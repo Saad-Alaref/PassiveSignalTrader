@@ -59,8 +59,34 @@ trade_manager: Optional[TradeManager] = None
 # --- Signal Handling for Graceful Shutdown ---
 def handle_shutdown_signal(sig, frame):
     """Initiates graceful shutdown when SIGINT or SIGTERM is received."""
-    global periodic_monitor_task, config_reloader_task, confirmation_update_task, daily_summary_task_handle # Added tasks
+    global periodic_monitor_task, config_reloader_task, confirmation_update_task, daily_summary_task_handle, telegram_sender, logger # Added telegram_sender
     logger.info(f"Received shutdown signal: {sig}. Initiating graceful shutdown...")
+
+    # Send Telegram shutdown notification
+    if telegram_sender:
+        try:
+            shutdown_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+            msg = (
+                f"🛑 <b>AI-Trader Bot Stopped</b>\n"
+                f"<b>Status:</b> <code>Stopped</code>\n"
+                f"<b>Shutdown Time:</b> <code>{shutdown_time}</code>\n"
+                f"<i>The bot has been stopped (manual Ctrl+C or system signal).</i>"
+            )
+            # Use asyncio to ensure the message is sent
+            import asyncio
+            loop = None
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            if loop and loop.is_running():
+                loop.create_task(telegram_sender.send_message(msg, parse_mode='html'))
+            else:
+                loop.run_until_complete(telegram_sender.send_message(msg, parse_mode='html'))
+            logger.info("Sent Telegram shutdown notification message.")
+        except Exception as shutdown_notify_err:
+            logger.error(f"Failed to send Telegram shutdown notification: {shutdown_notify_err}")
 
     # Cancel tasks
     if daily_summary_task_handle and not daily_summary_task_handle.done():
@@ -76,8 +102,7 @@ def handle_shutdown_signal(sig, frame):
         logger.info("Signal handler: Cancelling config reloader task...")
         config_reloader_task.cancel()
 
-    # Try to disconnect the client directly from the signal handler
-    # This should cause run_until_disconnected() to exit
+    # Disconnect Telegram reader client if running
     if telegram_reader and telegram_reader.client and telegram_reader.client.is_connected():
         logger.info("Signal handler: Disconnecting Telegram reader client...")
         # Use disconnect() which is generally safer than stop() from sync context
@@ -353,6 +378,28 @@ async def periodic_mt5_monitor_task(interval_seconds=60):
                 logger.info(f"[ManualTradeOnboarding] Onboarding manual trade: {trade_info_data}")
                 state_manager.add_active_trade(trade_info_data, auto_tp_applied=False)
 
+                # --- Send Telegram notification about the onboarded manual trade ---
+                if telegram_sender:
+                    try:
+                        # Format a message with trade info
+                        trade_type = "Pending Order" if trade_info_data['is_pending'] else "Market Position"
+                        msg = (
+                            f"📥 <b>Manual Trade Onboarded</b>\n"
+                            f"<b>Type:</b> {trade_type}\n"
+                            f"<b>Ticket:</b> <code>{trade_info_data['ticket']}</code>\n"
+                            f"<b>Symbol:</b> <code>{trade_info_data['symbol']}</code>\n"
+                            f"<b>Volume:</b> <code>{trade_info_data['original_volume']}</code>\n"
+                            f"<b>Entry Price:</b> <code>{trade_info_data['entry_price']}</code>\n"
+                            f"<b>SL:</b> <code>{trade_info_data['initial_sl']}</code>\n"
+                            f"<b>TP:</b> <code>{trade_info_data['assigned_tp']}</code>\n"
+                            f"<b>Source:</b> Manual (MT5)\n"
+                            f"<b>Time:</b> <code>{trade_info_data['open_time']}</code>\n"
+                        )
+                        await telegram_sender.send_message(msg, parse_mode='html')
+                        logger.info(f"[ManualTradeOnboarding] Sent Telegram notification for manual trade {trade_info_data['ticket']}")
+                    except Exception as notify_err:
+                        logger.error(f"[ManualTradeOnboarding] Failed to send Telegram notification for manual trade {trade_info_data['ticket']}: {notify_err}")
+
             # --- Call trade management routines as before ---
             # Existing logic follows here (unchanged)
             # ...
@@ -547,6 +594,21 @@ async def run_bot():
     except Exception as e:
         logger.critical(f"Failed to initialize components: {e}", exc_info=True)
         sys.exit(1)
+
+    # --- Notify Telegram channel that the bot is booting up ---
+    if telegram_sender:
+        try:
+            boot_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+            msg = (
+                f"🚦 <b>AI-Trader Bot Started</b>\n"
+                f"<b>Status:</b> <code>Running</code>\n"
+                f"<b>Boot Time:</b> <code>{boot_time}</code>\n"
+                f"<i>This is an automated notification that the trading bot is online.</i>"
+            )
+            await telegram_sender.send_message(msg, parse_mode='html')
+            logger.info("Sent Telegram boot notification message.")
+        except Exception as boot_notify_err:
+            logger.error(f"Failed to send Telegram boot notification: {boot_notify_err}")
 
     # 4. Connect to Services
     logger.info("Connecting to MT5...")

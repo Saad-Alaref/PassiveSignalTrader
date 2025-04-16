@@ -378,24 +378,21 @@ async def periodic_mt5_monitor_task(interval_seconds=60):
                 logger.info(f"[ManualTradeOnboarding] Onboarding manual trade: {trade_info_data}")
                 state_manager.add_active_trade(trade_info_data, auto_tp_applied=False)
 
-                # --- Immediately apply Auto SL/TP/BE/TSL if configured ---
-                # Fetch the just-onboarded trade_info object from StateManager
+                # --- Immediately apply Auto SL/TP/BE/TSL if configured, but only ONCE on onboarding ---
                 trade_info = next((t for t in state_manager.get_active_trades() if t.ticket == mt5_trade.ticket), None)
-                if trade_info:
-                    # Only apply to market positions (not pending orders)
-                    if not trade_info.is_pending:
-                        # Apply Auto SL if enabled and SL is missing
-                        if config_service.getboolean('AutoSL', 'enable_auto_sl', fallback=False) and (getattr(mt5_trade, 'sl', None) in [None, 0.0]):
-                            await trade_manager.check_and_apply_auto_sl(mt5_trade, trade_info)
-                        # Apply Auto TP if enabled and TP is missing
-                        if config_service.getboolean('AutoTP', 'enable_auto_tp', fallback=False) and (getattr(mt5_trade, 'tp', None) in [None, 0.0]):
-                            await trade_manager.check_and_apply_auto_tp(mt5_trade, trade_info)
-                        # Apply Auto BE if enabled (will only trigger if price condition is met)
-                        if config_service.getboolean('AutoBE', 'enable_auto_be', fallback=False):
-                            await trade_manager.check_and_apply_auto_be(mt5_trade, trade_info)
-                        # Apply TSL if enabled (will only trigger if price condition is met)
-                        if config_service.getboolean('TrailingStop', 'enable_trailing_stop', fallback=False):
-                            await trade_manager.check_and_apply_trailing_stop(mt5_trade, trade_info)
+                if trade_info and not trade_info.is_pending:
+                    # Apply Auto SL if enabled and SL is missing (do not overwrite existing SL)
+                    if config_service.getboolean('AutoSL', 'enable_auto_sl', fallback=False) and (getattr(mt5_trade, 'sl', None) in [None, 0.0]):
+                        await trade_manager.check_and_apply_auto_sl(mt5_trade, trade_info)
+                    # Apply Auto TP if enabled and TP is missing (do not overwrite existing TP)
+                    if config_service.getboolean('AutoTP', 'enable_auto_tp', fallback=False) and (getattr(mt5_trade, 'tp', None) in [None, 0.0]):
+                        await trade_manager.check_and_apply_auto_tp(mt5_trade, trade_info)
+                    # Apply Auto BE if enabled (will only trigger if price condition is met)
+                    if config_service.getboolean('AutoBE', 'enable_auto_be', fallback=False):
+                        await trade_manager.check_and_apply_auto_be(mt5_trade, trade_info)
+                    # Apply TSL if enabled (will only trigger if price condition is met)
+                    if config_service.getboolean('TrailingStop', 'enable_trailing_stop', fallback=False):
+                        await trade_manager.check_and_apply_trailing_stop(mt5_trade, trade_info)
 
                 # --- Send Telegram notification about the onboarded manual trade ---
                 if telegram_sender:

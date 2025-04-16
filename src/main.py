@@ -595,21 +595,6 @@ async def run_bot():
         logger.critical(f"Failed to initialize components: {e}", exc_info=True)
         sys.exit(1)
 
-    # --- Notify Telegram channel that the bot is booting up ---
-    if telegram_sender:
-        try:
-            boot_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
-            msg = (
-                f"🚦 <b>AI-Trader Bot Started</b>\n"
-                f"<b>Status:</b> <code>Running</code>\n"
-                f"<b>Boot Time:</b> <code>{boot_time}</code>\n"
-                f"<i>This is an automated notification that the trading bot is online.</i>"
-            )
-            await telegram_sender.send_message(msg, parse_mode='html')
-            logger.info("Sent Telegram boot notification message.")
-        except Exception as boot_notify_err:
-            logger.error(f"Failed to send Telegram boot notification: {boot_notify_err}")
-
     # 4. Connect to Services
     logger.info("Connecting to MT5...")
     if not mt5_connector.connect():
@@ -635,6 +620,20 @@ async def run_bot():
          sys.exit(1)
     logger.info("Telegram Reader Started.")
 
+    # --- Notify Telegram channel that the bot is booting up (after clients are connected) ---
+    if telegram_sender:
+        try:
+            boot_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+            msg = (
+                f"🚦 <b>AI-Trader Bot Started</b>\n"
+                f"<b>Status:</b> <code>Running</code>\n"
+                f"<b>Boot Time:</b> <code>{boot_time}</code>\n"
+                f"<i>This is an automated notification that the trading bot is online.</i>"
+            )
+            await telegram_sender.send_message(msg, parse_mode='html')
+            logger.info("Sent Telegram boot notification message.")
+        except Exception as boot_notify_err:
+            logger.error(f"Failed to send Telegram boot notification: {boot_notify_err}")
 
     # 5. Run main loop until shutdown signal
     # Start the periodic tasks using initial config values

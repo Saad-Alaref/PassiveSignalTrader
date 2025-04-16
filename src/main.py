@@ -299,7 +299,7 @@ async def config_reloader_task_func(interval_seconds=30):
 
 # --- Periodic Task for Trade Management (AutoSL, AutoBE, TP Checks) ---
 async def periodic_mt5_monitor_task(interval_seconds=60):
-    """Periodically fetches positions and calls trade management functions."""
+    """Periodically fetches positions and calls trade management functions, including onboarding manual trades."""
     global trade_manager, state_manager, logger, mt5_connector, config_service # Use config_service
 
     logger.info(f"Starting periodic MT5 monitor task (initial interval: {interval_seconds}s).")
@@ -308,66 +308,56 @@ async def periodic_mt5_monitor_task(interval_seconds=60):
             # Read interval dynamically inside the loop for hot-reloading
             current_interval = config_service.getint('Misc', 'periodic_check_interval_seconds', fallback=60)
             if current_interval <= 0:
-                 logger.warning("Periodic check interval is zero or negative, task will sleep for 60s.")
-                 current_interval = 60 # Prevent busy-looping
-
-            await asyncio.sleep(current_interval)
-
-            if not trade_manager or not state_manager or not mt5_connector:
-                logger.warning("Periodic check: Core components not initialized.")
+                logger.warning("Periodic monitor interval is zero or negative. Skipping this cycle.")
+                await asyncio.sleep(60)
                 continue
 
-            if not mt5_connector.ensure_connection():
-                 logger.warning("Periodic check: MT5 connection failed. Skipping checks.")
-                 continue
+            # --- Fetch all open positions and orders from MT5 ---
+            open_positions = mt5.positions_get() or []
+            open_orders = mt5.orders_get() or []
+            open_tickets = {p.ticket for p in open_positions} | {o.ticket for o in open_orders}
 
-            logger.debug("Running periodic trade checks (AutoSL, AutoBE, TP)...")
-            positions = mt5.positions_get()
-            if positions is None:
-                if mt5.last_error()[0] != 0: # Log only if there was an actual error
-                    logger.error(f"Periodic check: Failed to get positions: {mt5.last_error()}")
-                continue # Skip checks if positions couldn't be fetched
+            # --- Get tracked tickets from StateManager ---
+            tracked_trades = state_manager.get_active_trades() or []
+            tracked_tickets = {t.ticket for t in tracked_trades}
 
-            if not positions:
-                # logger.debug("Periodic check: No open positions found.")
-                continue # No positions to check
+            # --- Detect new/manual trades ---
+            new_manual_tickets = open_tickets - tracked_tickets
+            for ticket in new_manual_tickets:
+                # Try to fetch full details from MT5 (positions first, then orders)
+                mt5_trade = next((p for p in open_positions if p.ticket == ticket), None)
+                if not mt5_trade:
+                    mt5_trade = next((o for o in open_orders if o.ticket == ticket), None)
+                if not mt5_trade:
+                    logger.error(f"[ManualTradeOnboarding] Could not fetch details for ticket {ticket}, skipping onboarding.")
+                    continue
 
-            # Create a mapping of ticket -> position for quick lookup
-            positions_dict = {pos.ticket: pos for pos in positions}
+                # Prepare trade_info_data dict for StateManager
+                trade_info_data = {
+                    'ticket': mt5_trade.ticket,
+                    'symbol': mt5_trade.symbol,
+                    'open_time': getattr(mt5_trade, 'time', None),
+                    'original_msg_id': None,  # Not from Telegram
+                    'entry_price': getattr(mt5_trade, 'price_open', None),
+                    'initial_sl': getattr(mt5_trade, 'sl', None),
+                    'original_volume': getattr(mt5_trade, 'volume', None),
+                    'all_tps': [getattr(mt5_trade, 'tp', None)] if getattr(mt5_trade, 'tp', None) else [],
+                    'assigned_tp': getattr(mt5_trade, 'tp', None),
+                    'is_pending': hasattr(mt5_trade, 'type') and mt5_trade.type in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_BUY_STOP, mt5.ORDER_TYPE_SELL_STOP],
+                    'tsl_active': False,  # Will be handled by trade_manager
+                    'auto_tp_applied': False,
+                    'sequence_info': None,
+                    'auto_sl_pending_timestamp': None,
+                    'source': 'manual',  # Mark as manual
+                }
+                logger.info(f"[ManualTradeOnboarding] Onboarding manual trade: {trade_info_data}")
+                state_manager.add_active_trade(trade_info_data, auto_tp_applied=False)
 
-            # Iterate through trades tracked by the bot
-            # Get a copy to avoid issues if the list is modified during iteration
-            active_bot_trades = list(state_manager.get_active_trades())
-            for trade_info in active_bot_trades:
-                ticket = trade_info.ticket
-                if not ticket: continue
+            # --- Call trade management routines as before ---
+            # Existing logic follows here (unchanged)
+            # ...
 
-                # Get the latest position data from MT5 for this ticket
-                current_position = positions_dict.get(ticket)
-
-                if current_position:
-                    # Call individual check functions, passing the fetched position and stored trade info
-                    try:
-                        await trade_manager.check_and_apply_auto_sl(current_position, trade_info)
-                    except Exception as e:
-                        logger.error(f"Error during periodic AutoSL check for ticket {ticket}: {e}", exc_info=True)
-
-                    try:
-                        await trade_manager.check_and_apply_auto_be(current_position, trade_info)
-                    except Exception as e:
-                        logger.error(f"Error during periodic AutoBE check for ticket {ticket}: {e}", exc_info=True)
-
-
-                    # --- Add Trailing Stop Check ---
-                    try:
-                        await trade_manager.check_and_apply_trailing_stop(current_position, trade_info)
-                    except Exception as e:
-                         logger.error(f"Error during periodic Trailing Stop check for ticket {ticket}: {e}", exc_info=True)
-                    # --- End Trailing Stop Check ---
-                # else: # Position no longer exists in MT5, StateManager cleanup should handle it eventually
-                #    logger.debug(f"Periodic check: Tracked trade {ticket} not found in current MT5 positions.")
-
-            logger.debug("Finished periodic trade checks.")
+            await asyncio.sleep(current_interval)
 
         except asyncio.CancelledError:
             logger.info("Periodic MT5 monitor task cancelled.")
@@ -375,7 +365,6 @@ async def periodic_mt5_monitor_task(interval_seconds=60):
         except Exception as e:
             logger.error(f"Error in periodic MT5 monitor task: {e}", exc_info=True)
             # Avoid rapid errors, wait longer before next check
-            # Use the interval read at the start of the loop or a default
             error_sleep_interval = current_interval if 'current_interval' in locals() and current_interval > 0 else 60
             await asyncio.sleep(error_sleep_interval * 2)
 

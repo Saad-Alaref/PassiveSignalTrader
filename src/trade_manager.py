@@ -512,3 +512,44 @@ class TradeManager:
     # TP hits should be handled by monitoring the assigned_tp for each individual trade/position,
     # or potentially by a separate, more advanced monitoring component if complex multi-TP
     # strategies beyond simple assignment are needed in the future.
+
+    async def check_and_apply_auto_tp(self, position, trade_info):
+        """
+        Checks if AutoTP should be applied to a trade and applies TP if conditions are met.
+        Args:
+            position (mt5.PositionInfo): The current position data from MT5.
+            trade_info (TradeInfo): The internally tracked trade data object from StateManager.
+        """
+        enable_auto_tp = self.config_service.getboolean('AutoTP', 'enable_auto_tp', fallback=False)
+        if not enable_auto_tp:
+            return
+        if not position or not trade_info:
+            return
+        ticket = position.ticket
+        log_prefix_auto_tp = f"[AutoTP][Ticket: {ticket}]"
+        current_tp = getattr(position, 'tp', None)
+        if current_tp not in [None, 0.0]:
+            return  # Already has TP
+        # Calculate TP using trade_calculator (assuming such method exists)
+        try:
+            tp_distance = self.config_service.getfloat('AutoTP', 'auto_tp_pips', fallback=100.0)
+            symbol = position.symbol
+            order_type = position.type
+            entry_price = getattr(position, 'price_open', None)
+            if not entry_price:
+                logger.error(f"{log_prefix_auto_tp} Entry price missing, cannot calculate TP.")
+                return
+            tp_price = self.trade_calculator.calculate_tp_price(symbol, order_type, entry_price, tp_distance)
+            if tp_price is None:
+                logger.error(f"{log_prefix_auto_tp} Failed to calculate TP price.")
+                return
+            modify_success = self.mt5_executor.modify_trade(ticket=ticket, tp=tp_price)
+            if modify_success:
+                logger.info(f"{log_prefix_auto_tp} Successfully applied AutoTP: {tp_price}")
+                # Optionally notify via Telegram
+                if self.telegram_sender:
+                    await self.telegram_sender.send_message(f"🎯 {log_prefix_auto_tp} TP set to {tp_price}")
+            else:
+                logger.error(f"{log_prefix_auto_tp} Failed to set TP via modify_trade.")
+        except Exception as e:
+            logger.error(f"{log_prefix_auto_tp} Exception during AutoTP application: {e}")

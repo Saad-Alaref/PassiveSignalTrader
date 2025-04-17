@@ -383,7 +383,7 @@ async def periodic_mt5_monitor_task(interval_seconds=60):
                 logger.info(f"[ManualTradeOnboarding][DEBUG] Trade SL before: {getattr(mt5_trade, 'sl', None)}, TP before: {getattr(mt5_trade, 'tp', None)}")
 
                 trade_info = next((t for t in state_manager.get_active_trades() if t.ticket == mt5_trade.ticket), None)
-                if trade_info and not trade_info.is_pending:
+                if trade_info and not trade_info.is_pending and hasattr(mt5_trade, 'profit'):
                     # Apply Auto SL if enabled and SL is missing (do not overwrite existing SL)
                     if config_service.getboolean('AutoSL', 'enable_auto_sl', fallback=False) and (getattr(mt5_trade, 'sl', None) in [None, 0.0]):
                         logger.info(f"[ManualTradeOnboarding][DEBUG] Attempting to apply Auto SL...")

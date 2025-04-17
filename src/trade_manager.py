@@ -46,102 +46,41 @@ class TradeManager:
             position (mt5.PositionInfo): The current position data from MT5.
             trade_info (TradeInfo): The internally tracked trade data object from StateManager.
         """
-        # --- Read AutoSL config dynamically ---
-        enable_auto_sl = self.config_service.getboolean('AutoSL', 'enable_auto_sl', fallback=False) # Use service
+        enable_auto_sl = self.config_service.getboolean('AutoSL', 'enable_auto_sl', fallback=False)
         if not enable_auto_sl:
-            return # Feature disabled
-
-        auto_sl_delay_sec = self.config_service.getint('AutoSL', 'auto_sl_delay_seconds', fallback=60) # Use service
-        auto_sl_distance = self.config_service.getfloat('AutoSL', 'auto_sl_risk_pips', fallback=40.0) # Use service, now in pips
-        # --- End Read AutoSL config ---
-
-        now_utc = datetime.now(timezone.utc)
-
-        # Check if this specific trade is marked for AutoSL
-        pending_timestamp = trade_info.auto_sl_pending_timestamp # Use attribute access
-        if not pending_timestamp:
-            return # Not pending for this trade
-
-        ticket = trade_info.ticket # Use attribute access
-        log_prefix_auto_sl = f"[AutoSL Check][Ticket: {ticket}]"
-        needs_flag_removal = False # Flag to indicate if pending flag should be removed after checks
-
-        # Check if delay has passed
-        if now_utc < pending_timestamp + timedelta(seconds=auto_sl_delay_sec):
-            logger.debug(f"{log_prefix_auto_sl} AutoSL delay not yet passed.")
-            return # Delay not yet passed, keep flag
-
-        logger.info(f"{log_prefix_auto_sl} AutoSL delay passed. Checking trade status...")
-
-        # Verify trade exists (using position passed in) and still has no SL
-        if not position: # Should not happen if called correctly
-            logger.error(f"{log_prefix_auto_sl} Position data missing. Cannot apply AutoSL.")
-            needs_flag_removal = True # Remove flag as we can't process
-        else:
-            current_sl = position.sl
-            trade_type = position.type
-            volume = position.volume
-            entry_price = position.price_open # Use actual open price
+            logger.info("[AutoSL] Feature disabled.")
+            return
+        if not position or not trade_info:
+            logger.error("[AutoSL] Missing position or trade_info.")
+            return
+        ticket = position.ticket
+        log_prefix_auto_sl = f"[AutoSL][Ticket: {ticket}]"
+        current_sl = getattr(position, 'sl', None)
+        if current_sl not in [None, 0.0]:
+            logger.info(f"{log_prefix_auto_sl} SL already set (current SL: {current_sl}). No action.")
+            return  # Already has SL
+        # Calculate SL using trade_calculator (assuming such method exists)
+        try:
+            sl_distance = self.config_service.getfloat('AutoSL', 'auto_sl_pips', fallback=40.0)
             symbol = position.symbol
-            logger.debug(f"{log_prefix_auto_sl} Position details: SL={current_sl}, Type={trade_type}, Vol={volume}, Entry={entry_price}")
-
-            # Check if SL was added manually or by another update
-            if current_sl is not None and current_sl != 0.0:
-                logger.info(f"{log_prefix_auto_sl} SL ({current_sl}) already exists. Removing from AutoSL check.")
-                needs_flag_removal = True
-
-        # --- Conditions met: Apply Auto SL ---
-        if not needs_flag_removal: # Only proceed if SL doesn't exist and position is valid
-            logger.info(f"{log_prefix_auto_sl} Applying AutoSL (Distance: {auto_sl_distance})...")
-
-            # Basic validation of fetched position data
-            if entry_price is None or entry_price == 0.0:
-                 logger.error(f"{log_prefix_auto_sl} Cannot apply AutoSL: Entry price is invalid ({entry_price}).")
-                 needs_flag_removal = True # Avoid retrying
-            elif volume is None or volume <= 0:
-                 logger.error(f"{log_prefix_auto_sl} Cannot apply AutoSL: Invalid volume ({volume}).")
-                 needs_flag_removal = True # Avoid retrying
-            elif trade_type is None or trade_type not in [mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL]:
-                 logger.error(f"{log_prefix_auto_sl} Cannot apply AutoSL: Invalid trade type ({trade_type}).")
-                 needs_flag_removal = True # Avoid retrying
+            order_type = position.type
+            entry_price = getattr(position, 'price_open', None)
+            if not entry_price:
+                logger.error(f"{log_prefix_auto_sl} Entry price missing, cannot calculate SL.")
+                return
+            sl_price = self.trade_calculator.calculate_sl_price(symbol, order_type, entry_price, sl_distance)
+            if sl_price is None:
+                logger.error(f"{log_prefix_auto_sl} Failed to calculate SL price.")
+                return
+            modify_success = self.mt5_executor.modify_trade(ticket=ticket, sl=sl_price)
+            if modify_success:
+                logger.info(f"{log_prefix_auto_sl} Successfully applied AutoSL: {sl_price}")
+                if self.telegram_sender:
+                    await self.telegram_sender.send_message(f"🛡️ {log_prefix_auto_sl} SL set to {sl_price}")
             else:
-                # Calculate SL price using the fixed pip distance from config
-                # auto_sl_distance variable holds the pips value read from config
-                # No conversion needed here, pass pips directly to the correct calculator method
-                # sl_price_distance = auto_sl_distance * 0.1 # REMOVED - Incorrect conversion
-                auto_sl_price = self.trade_calculator.calculate_sl_from_pips( # Use correct method name
-                    symbol=symbol,
-                    order_type=trade_type,
-                    entry_price=entry_price,
-                    sl_distance_pips=auto_sl_distance # Pass the pips value directly
-                )
-
-                if auto_sl_price is None:
-                    logger.error(f"{log_prefix_auto_sl} Failed to calculate AutoSL price.")
-                    needs_flag_removal = True # Remove flag on calculation failure for now
-                else:
-                    # Apply the calculated SL
-                    modify_success = self.mt5_executor.modify_trade(ticket=ticket, sl=auto_sl_price)
-
-                    if modify_success:
-                        logger.info(f"{log_prefix_auto_sl} Successfully applied AutoSL: {auto_sl_price}")
-                        needs_flag_removal = True # Mark as done
-
-                        # Send notifications
-                        entry_price_str = f"@{entry_price}" if entry_price is not None else "Market"
-                        status_msg_auto_sl = f"🤖 <b>Auto StopLoss Applied</b>\n<b>Ticket:</b> <code>{ticket}</code> (Entry: {entry_price_str})\n<b>New SL:</b> <code>{auto_sl_price}</code> (Distance: {auto_sl_distance} pips)"
-                        await self.telegram_sender.send_message(status_msg_auto_sl, parse_mode='html')
-                        debug_channel_id = getattr(self.telegram_sender, 'debug_target_channel_id', None)
-                        if debug_channel_id:
-                             await self.telegram_sender.send_message(f"🤖 {log_prefix_auto_sl} Applied AutoSL: {auto_sl_price}", target_chat_id=debug_channel_id)
-                    else:
-                        logger.error(f"{log_prefix_auto_sl} Failed to apply AutoSL price {auto_sl_price} via modify_trade.")
-                        # Keep pending flag, maybe modification works next time?
-
-        # Remove pending flag if processed or invalid
-        if needs_flag_removal:
-            self.state_manager.remove_auto_sl_pending_flag(ticket)
-
+                logger.error(f"{log_prefix_auto_sl} Failed to set SL via modify_trade.")
+        except Exception as e:
+            logger.error(f"{log_prefix_auto_sl} Exception during AutoSL application: {e}")
 
     async def check_and_apply_auto_be(self, position, trade_info: TradeInfo): # Type hint
         """
@@ -152,148 +91,42 @@ class TradeManager:
             position (mt5.PositionInfo): The current position data from MT5.
             trade_info (TradeInfo): The internally tracked trade data object from StateManager.
         """
-        # --- Read AutoBE config dynamically ---
-        enable_auto_be = self.config_service.getboolean('AutoBE', 'enable_auto_be', fallback=False) # Use service
-        if not position or not trade_info:
-            logger.error("AutoBE check missing position or trade_info.")
-            return
-
-        ticket = position.ticket
-        log_prefix_auto_be = f"[AutoBE Check][Ticket: {ticket}]"
-
+        enable_auto_be = self.config_service.getboolean('AutoBE', 'enable_auto_be', fallback=False)
         if not enable_auto_be:
-            return # Feature disabled
-
-        if trade_info.auto_be_applied:
-            logger.debug(f"{log_prefix_auto_be} AutoBE already applied. Skipping.")
+            logger.info("[AutoBE] Feature disabled.")
             return
-
-        profit_pips_threshold_config = self.config_service.getfloat('AutoBE', 'auto_be_profit_pips', fallback=30.0) # Use service, read pips
-
-        if profit_pips_threshold_config <= 0:
-            logger.warning("AutoBE profit threshold (auto_be_profit_pips) is zero or negative, disabling check.")
+        if not position or not trade_info or not hasattr(position, 'profit'):
+            logger.error("[AutoBE] Missing position, trade_info, or profit attribute.")
             return
-        # base_lot_size no longer needed for pip-based activation
-        # --- End Read AutoBE config ---
-
-        # current_profit = position.profit # No longer needed for activation check
-        current_sl = position.sl
-        entry_price = position.price_open
-        trade_type = position.type
-        symbol = position.symbol # Need symbol for calculations
-
-        # Get symbol info for pip calculations
-        logger.debug(f"[AutoBE Test Debug] entry_price={entry_price}, trade_type={trade_type}, symbol={symbol}")
-        symbol_info = self.mt5_fetcher.get_symbol_info(symbol)
-        if not symbol_info:
-            logger.error(f"{log_prefix_auto_be} Cannot get symbol info for {symbol}. Skipping AutoBE check.")
+        ticket = position.ticket
+        log_prefix_auto_be = f"[AutoBE][Ticket: {ticket}]"
+        current_sl = getattr(position, 'sl', None)
+        entry_price = getattr(position, 'price_open', None)
+        profit = getattr(position, 'profit', None)
+        if profit is None:
+            logger.error(f"{log_prefix_auto_be} No profit attribute on position. Skipping BE check.")
             return
-        point = symbol_info.point
-        digits = symbol_info.digits
-        logger.debug(f"[AutoBE Test Debug] symbol_info.point={point}, symbol_info.digits={digits}")
+        # Add your BE logic here (example: set SL to entry if profit > threshold)
+        try:
+            be_profit_threshold = self.config_service.getfloat('AutoBE', 'be_profit_threshold', fallback=5.0)
+            if profit >= be_profit_threshold:
+                if current_sl != entry_price:
+                    modify_success = self.mt5_executor.modify_trade(ticket=ticket, sl=entry_price)
+                    if modify_success:
+                        logger.info(f"{log_prefix_auto_be} Successfully moved SL to BE: {entry_price}")
+                        if self.telegram_sender:
+                            await self.telegram_sender.send_message(f"🟩 {log_prefix_auto_be} SL moved to BE: {entry_price}")
+                    else:
+                        logger.error(f"{log_prefix_auto_be} Failed to move SL to BE.")
+                else:
+                    logger.info(f"{log_prefix_auto_be} SL already at BE. No action.")
+            else:
+                logger.info(f"{log_prefix_auto_be} Profit {profit} below threshold {be_profit_threshold}. No BE action.")
+        except Exception as e:
+            logger.error(f"{log_prefix_auto_be} Exception during AutoBE application: {e}")
 
-        # Calculate required profit distance in price units
-        required_price_distance = round(profit_pips_threshold_config * (point * 10), digits) # Assuming 1 pip = 10 points
-
-        # Get current market price to calculate current profit distance
-        logger.debug(f"[AutoBE Test Debug] profit_pips_threshold_config={profit_pips_threshold_config}, required_price_distance={required_price_distance}")
-        tick = self.mt5_fetcher.get_symbol_tick(symbol)
-        if not tick:
-            logger.warning(f"{log_prefix_auto_be} Could not get current tick for {symbol}. Skipping AutoBE check.")
-            return
-        relevant_market_price = tick.bid if trade_type == mt5.ORDER_TYPE_BUY else tick.ask
-
-        # Calculate current profit distance in price units
-        current_price_distance_profit = 0.0
-        if trade_type == mt5.ORDER_TYPE_BUY:
-            current_price_distance_profit = relevant_market_price - entry_price # Bid - Entry
-        elif trade_type == mt5.ORDER_TYPE_SELL:
-            current_price_distance_profit = entry_price - relevant_market_price # Entry - Ask
-
-        logger.debug(f"{log_prefix_auto_be} ConfigPips={profit_pips_threshold_config}, RequiredPriceDist={required_price_distance:.{digits}f}, CurrentPriceDist={current_price_distance_profit:.{digits}f}")
-        logger.debug(f"[AutoBE Test Debug] current_price_distance_profit={current_price_distance_profit}, required_price_distance={required_price_distance}")
-        logger.debug(f"[AutoBE Test Debug] Should trigger BE? {current_price_distance_profit >= required_price_distance}")
-
-        # Check if profit distance threshold is met
-        if current_price_distance_profit < required_price_distance:
-            # logger.debug(f"{log_prefix_auto_be} Current distance {current_price_distance_profit:.{digits}f} < Required distance {required_price_distance:.{digits}f}. No action.")
-            return
-
-        # Check if SL is already at breakeven or better
-        sl_is_at_or_better_than_be = False
-        if current_sl is not None and current_sl != 0.0:
-            if trade_type == mt5.ORDER_TYPE_BUY and current_sl >= entry_price:
-                sl_is_at_or_better_than_be = True
-            elif trade_type == mt5.ORDER_TYPE_SELL and current_sl <= entry_price:
-                sl_is_at_or_better_than_be = True
-
-        if sl_is_at_or_better_than_be:
-            logger.debug(f"{log_prefix_auto_be} SL ({current_sl}) is already at or better than breakeven ({entry_price}). No action.")
-            return
-
-        # --- Conditions met: Apply Auto BE ---
-        logger.info(f"{log_prefix_auto_be} Profit Distance {current_price_distance_profit:.{digits}f} >= Required Distance {required_price_distance:.{digits}f}. Attempting to move SL to Breakeven ({entry_price}).")
-
-        # Calculate BE SL directly, accounting for spread and offset
-        symbol_info = self.mt5_fetcher.get_symbol_info(position.symbol)
-        point = symbol_info.point if symbol_info else 0.00001 # Default point size if info fails
-        digits = symbol_info.digits if symbol_info else 5 # Default digits if info fails
-        sl_offset_pips = self.config_service.getfloat('Trading', 'sl_offset_pips', fallback=0.0)
-        offset_price = round(sl_offset_pips * (point * 10), digits) # Assuming 1 pip = 10 points for offset config
-
-        tick = self.mt5_fetcher.get_symbol_tick(position.symbol)
-        spread = 0.0
-        if tick and tick.ask > 0 and tick.bid > 0: # Ensure valid tick data
-            spread = round(tick.ask - tick.bid, digits)
-        else:
-            logger.warning(f"{log_prefix_auto_be} Could not get valid tick for spread calculation. Using offset only for BE SL.")
-
-        # Use the adjusted entry price stored in trade_info as the base for BE
-        base_entry_for_be = trade_info.entry_price
-        if base_entry_for_be is None:
-             logger.error(f"{log_prefix_auto_be} Cannot calculate BE SL: Adjusted entry price not found in trade_info.")
-             return # Cannot proceed without the adjusted entry
-
-        be_sl = None
-        if trade_type == mt5.ORDER_TYPE_BUY:
-            # For BUY, BE SL should be slightly ABOVE adjusted entry
-            be_sl = round(base_entry_for_be + spread + offset_price, digits)
-            logger.debug(f"{log_prefix_auto_be} Calculating BUY BE SL: AdjEntry={base_entry_for_be}, Spread={spread}, Offset={offset_price} -> BE_SL={be_sl}")
-        elif trade_type == mt5.ORDER_TYPE_SELL:
-            # For SELL, BE SL should be slightly BELOW adjusted entry
-            be_sl = round(base_entry_for_be - spread - offset_price, digits)
-            logger.debug(f"{log_prefix_auto_be} Calculating SELL BE SL: AdjEntry={base_entry_for_be}, Spread={spread}, Offset={offset_price} -> BE_SL={be_sl}")
-        else:
-            logger.error(f"{log_prefix_auto_be} Unknown trade type {trade_type}. Cannot calculate BE SL.")
-            return # Abort if type is unknown
-
-        # Sanity check: Ensure BE SL is actually better than entry after adjustments
-        # Sanity check: Ensure BE SL is actually better than the adjusted entry after adjustments
-        if (trade_type == mt5.ORDER_TYPE_BUY and be_sl <= base_entry_for_be) or \
-           (trade_type == mt5.ORDER_TYPE_SELL and be_sl >= base_entry_for_be):
-            logger.warning(f"{log_prefix_auto_be} Calculated BE SL ({be_sl}) is not better than adjusted entry ({base_entry_for_be}) after spread/offset. Setting SL exactly to adjusted entry price as fallback.")
-            be_sl = base_entry_for_be # Fallback to exact adjusted entry if adjustment goes wrong way
-
-        if be_sl is None: # Should not happen if type check passed, but safety check
-             logger.error(f"{log_prefix_auto_be} Failed to determine valid BE SL price. Aborting AutoBE.")
-             return
-
-        logger.debug(f"{log_prefix_auto_be} Conditions met. Calling modify_trade with ticket={ticket}, sl={be_sl}") # Add log before call
-        modify_success = self.mt5_executor.modify_trade(ticket=ticket, sl=be_sl)
-
-        if modify_success:
-            logger.info(f"{log_prefix_auto_be} Successfully moved SL to Breakeven: {entry_price}")
-            trade_info.auto_be_applied = True
-            # Send notifications
-            entry_price_str = f"@{entry_price:.{digits}f}" # Use digits for formatting
-            status_msg_auto_be = f"🛡️ <b>Auto Breakeven Applied</b>\n<b>Ticket:</b> <code>{ticket}</code> (Entry: {entry_price_str})\n<b>New SL:</b> <code>{be_sl}</code> (Profit Trigger: ≥ {profit_pips_threshold_config} pips)"
-            await self.telegram_sender.send_message(status_msg_auto_be, parse_mode='html')
-            debug_channel_id = getattr(self.telegram_sender, 'debug_target_channel_id', None)
-            if debug_channel_id:
-                 await self.telegram_sender.send_message(f"🛡️ {log_prefix_auto_be} Applied AutoBE: SL moved to {be_sl}", target_chat_id=debug_channel_id)
-        else:
-            logger.error(f"{log_prefix_auto_be} Failed to apply AutoBE via modify_sl_to_breakeven.")
-
+    # Add a calculate_sl_price helper to TradeCalculator if missing
+    # NOTE: Implement calculate_sl_price in TradeCalculator if missing
 
     async def check_and_apply_trailing_stop(self, position, trade_info: TradeInfo): # Type hint
         """

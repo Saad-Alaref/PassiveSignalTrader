@@ -246,6 +246,26 @@ class TradeCalculator:
         """
         return self.calculate_sl_from_pips(symbol, order_type, entry_price, sl_distance_pips)
 
+    def calculate_tp_price(self, symbol, order_type, entry_price, tp_distance_pips):
+        """
+        Calculates the Take Profit price given the entry price, symbol, order type, and TP distance in pips.
+        """
+        # Get symbol info for point size
+        symbol_info = self.fetcher.get_symbol_info(symbol)
+        if not symbol_info:
+            logger.error(f"[TradeCalculator] Could not get symbol info for {symbol}.")
+            return None
+        point = symbol_info.point
+        digits = symbol_info.digits
+        tp_distance = tp_distance_pips * point * 10  # pips to price
+        if order_type == mt5.ORDER_TYPE_BUY:
+            return round(entry_price + tp_distance, digits)
+        elif order_type == mt5.ORDER_TYPE_SELL:
+            return round(entry_price - tp_distance, digits)
+        else:
+            logger.error(f"[TradeCalculator] Unknown order type {order_type} for TP calculation.")
+            return None
+
     def calculate_tp_from_distance(self, symbol: str, order_type: int, entry_price: float, tp_distance_pips: float):
         """
         Calculates the Take Profit price based on a fixed distance in pips from entry.
